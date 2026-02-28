@@ -1,0 +1,2298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>DAST Platform — AI-Powered Security Scanner</title>
+<style>
+/* ── Design Tokens ───────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  /* Background layers */
+  --bg:          #070b14;
+  --surface:     #0d1421;
+  --surface2:    #121a2b;
+  --surface3:    #172035;
+  --surface4:    #1c2740;
+
+  /* Borders */
+  --border:      #1e2d44;
+  --border2:     #253652;
+  --border3:     #2e4165;
+
+  /* Text */
+  --fg:          #e2e8f0;
+  --fg2:         #94a3b8;
+  --muted:       #4b6585;
+
+  /* Brand */
+  --accent:      #3b82f6;
+  --accent2:     #2563eb;
+  --accent-glow: rgba(59,130,246,.12);
+  --accent-dim:  #1e3a5f;
+
+  /* Severity */
+  --critical:     #dc2626;
+  --critical-dim: #450a0a;
+  --high:         #ea580c;
+  --high-dim:     #431407;
+  --medium:       #ca8a04;
+  --medium-dim:   #422006;
+  --low:          #16a34a;
+  --low-dim:      #052e16;
+  --info:         #0891b2;
+  --info-dim:     #082f49;
+
+  /* UI colors */
+  --green:     #22c55e;
+  --green-dim: #052e16;
+  --red:       #ef4444;
+  --red-dim:   #450a0a;
+  --yellow:    #f59e0b;
+  --yellow-dim:#422006;
+  --purple:    #a855f7;
+  --cyan:      #06b6d4;
+  --orange:    #f97316;
+
+  /* Phase colors */
+  --disc:    #3b82f6;
+  --scan:    #ef4444;
+  --auth:    #a855f7;
+  --proto:   #06b6d4;
+
+  /* Geometry */
+  --radius:  6px;
+  --radius2: 10px;
+  --sidebar: 52px;
+
+  /* Typography */
+  --font:  'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --mono:  'JetBrains Mono', 'Cascadia Code', 'Fira Code', 'Courier New', monospace;
+
+  /* Shadows */
+  --shadow:     0 2px 8px rgba(0,0,0,.4);
+  --shadow-lg:  0 8px 24px rgba(0,0,0,.6);
+}
+
+html, body { height: 100%; background: var(--bg); color: var(--fg); font-family: var(--font); font-size: 13px; line-height: 1.5; }
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border3); border-radius: 3px; }
+input, select, textarea { font-family: inherit; font-size: inherit; }
+
+/* ── App Shell ───────────────────────────────────────────────────────────── */
+#app { display: grid; grid-template-columns: var(--sidebar) 1fr; grid-template-rows: 56px 1fr; height: 100vh; overflow: hidden; }
+
+/* ── Sidebar ─────────────────────────────────────────────────────────────── */
+#sidebar {
+  grid-row: 1 / 3;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; align-items: center;
+  padding: 8px 0;
+  gap: 2px;
+  z-index: 10;
+}
+
+.sidebar-logo {
+  width: 36px; height: 36px; margin-bottom: 10px;
+  background: var(--accent); border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 18px; flex-shrink: 0;
+  box-shadow: 0 0 16px var(--accent-glow);
+}
+
+.nav-item {
+  width: 40px; height: 40px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: var(--radius); cursor: pointer;
+  color: var(--muted); font-size: 17px;
+  transition: all .15s; position: relative;
+  border: 1px solid transparent;
+}
+.nav-item:hover { color: var(--fg); background: var(--surface2); }
+.nav-item.active {
+  color: var(--accent); background: var(--accent-glow);
+  border-color: var(--border2);
+}
+.nav-item .nav-tip {
+  position: absolute; left: calc(100% + 10px); top: 50%;
+  transform: translateY(-50%);
+  background: var(--surface3); border: 1px solid var(--border2);
+  border-radius: 4px; padding: 4px 8px;
+  font-size: 11px; font-weight: 600; white-space: nowrap;
+  color: var(--fg); pointer-events: none;
+  opacity: 0; transition: opacity .15s; z-index: 100;
+  box-shadow: var(--shadow);
+}
+.nav-item:hover .nav-tip { opacity: 1; }
+
+.nav-divider { width: 24px; height: 1px; background: var(--border); margin: 4px 0; flex-shrink: 0; }
+.nav-spacer  { flex: 1; }
+
+/* ── Header ──────────────────────────────────────────────────────────────── */
+#header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 0 16px;
+  display: flex; align-items: center; gap: 10px;
+}
+
+.brand { font-size: 13px; font-weight: 800; letter-spacing: .5px; white-space: nowrap; margin-right: 4px; }
+.brand .brand-accent { color: var(--accent); }
+.brand-sub { font-size: 9px; color: var(--muted); letter-spacing: .4px; text-transform: uppercase; }
+
+.target-wrap {
+  flex: 1; max-width: 520px;
+  background: var(--surface2);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  display: flex; align-items: center;
+  padding: 0 10px; gap: 6px;
+  transition: border-color .15s;
+}
+.target-wrap:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+.target-icon { color: var(--muted); font-size: 14px; flex-shrink: 0; }
+#target-input {
+  flex: 1; background: none; border: none; outline: none;
+  color: var(--fg); font-size: 13px; padding: 7px 0;
+  font-family: var(--mono);
+}
+#target-input::placeholder { color: var(--muted); font-family: var(--font); font-size: 12px; }
+
+.hdr-right { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+
+/* Progress arc / indicator */
+#scan-progress { width: 120px; height: 5px; background: var(--surface3); border-radius: 3px; overflow: hidden; }
+#scan-progress-bar { height: 100%; background: linear-gradient(90deg, var(--accent), var(--cyan)); width: 0%; transition: width .5s; border-radius: 3px; }
+
+#status-label {
+  font-size: 11px; color: var(--fg2); white-space: nowrap;
+  min-width: 80px; text-align: right;
+}
+
+/* Buttons */
+button { cursor: pointer; border: none; border-radius: var(--radius); padding: 6px 14px; font-size: 12px; font-weight: 600; font-family: inherit; transition: all .15s; white-space: nowrap; }
+button:hover:not(:disabled) { filter: brightness(1.1); }
+button:disabled { opacity: .4; cursor: not-allowed; }
+
+.btn-scan   { background: var(--accent); color: #fff; padding: 7px 18px; font-size: 13px; box-shadow: 0 0 12px var(--accent-glow); }
+.btn-scan:hover:not(:disabled) { background: var(--accent2); box-shadow: 0 0 20px var(--accent-glow); }
+.btn-stop   { background: var(--red-dim); color: var(--red); border: 1px solid rgba(239,68,68,.3); }
+.btn-ghost  { background: var(--surface3); color: var(--fg2); border: 1px solid var(--border2); }
+.btn-ghost:hover { color: var(--fg); border-color: var(--border3); }
+.btn-sm     { padding: 4px 10px; font-size: 11px; }
+.btn-xs     { padding: 3px 8px; font-size: 10px; border-radius: 4px; }
+.btn-export { background: var(--green-dim); color: var(--green); border: 1px solid rgba(34,197,94,.2); }
+.btn-fabric { background: rgba(168,85,247,.1); color: var(--purple); border: 1px solid rgba(168,85,247,.2); }
+
+/* Badges */
+.badge { display: inline-flex; align-items: center; gap: 4px; border-radius: 4px; padding: 2px 7px; font-size: 10px; font-weight: 700; letter-spacing: .3px; }
+.badge-running  { background: rgba(59,130,246,.15); color: var(--accent); }
+.badge-findings { background: rgba(239,68,68,.15); color: var(--red); }
+.badge-static   { background: rgba(245,158,11,.15); color: var(--yellow); }
+.badge-ok       { background: rgba(34,197,94,.15); color: var(--green); }
+.badge-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulse 1.4s infinite; }
+
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+
+/* ── Main area ───────────────────────────────────────────────────────────── */
+#main {
+  overflow: hidden; display: flex; flex-direction: column;
+  background: var(--bg);
+}
+
+/* ── Sections ─────────────────────────────────────────────────────────────── */
+.section { flex: 1; display: none; overflow: hidden; flex-direction: column; }
+.section.active { display: flex; }
+
+/* ── Section header strip ────────────────────────────────────────────────── */
+.section-header {
+  flex-shrink: 0;
+  padding: 12px 16px 8px;
+  display: flex; align-items: center; gap: 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.section-title { font-size: 13px; font-weight: 700; color: var(--fg); display: flex; align-items: center; gap: 8px; }
+.section-subtitle { font-size: 11px; color: var(--muted); }
+.section-actions { display: flex; gap: 6px; margin-left: auto; }
+
+/* ── Phase tabs (agents section) ─────────────────────────────────────────── */
+#phase-bar {
+  flex-shrink: 0; display: flex; gap: 2px; padding: 0 16px;
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  height: 36px; align-items: center;
+}
+.phase-tab {
+  padding: 4px 12px; border-radius: 4px; cursor: pointer;
+  font-size: 11px; font-weight: 600; color: var(--muted);
+  border: 1px solid transparent; transition: all .15s;
+  white-space: nowrap; display: flex; align-items: center; gap: 5px;
+}
+.phase-tab:hover { color: var(--fg); background: var(--surface2); }
+.phase-tab.active { color: var(--fg); background: var(--surface3); border-color: var(--border2); }
+.ph-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+.phase-tab[data-phase="all"]                  .ph-dot { background: var(--fg2); }
+.phase-tab[data-phase="Discovery"]            .ph-dot { background: var(--disc); }
+.phase-tab[data-phase="Active Scanning"]      .ph-dot { background: var(--scan); }
+.phase-tab[data-phase="Auth & Session"]       .ph-dot { background: var(--auth); }
+.phase-tab[data-phase="Protocol & Transport"] .ph-dot { background: var(--proto); }
+.phase-count { font-size: 10px; color: var(--muted); }
+
+/* ── Agent workspace ─────────────────────────────────────────────────────── */
+#agent-workspace { flex: 1; display: flex; overflow: hidden; }
+
+/* Agent grid */
+#agent-grid-wrap { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 14px; }
+
+.phase-group {}
+.phase-label {
+  font-size: 10px; font-weight: 700; letter-spacing: 1px;
+  text-transform: uppercase; padding: 0 2px 8px;
+  display: flex; align-items: center; gap: 8px;
+}
+.phase-label[data-phase="Discovery"]           { color: var(--disc); }
+.phase-label[data-phase="Active Scanning"]     { color: var(--scan); }
+.phase-label[data-phase="Auth & Session"]      { color: var(--auth); }
+.phase-label[data-phase="Protocol & Transport"] { color: var(--proto); }
+.phase-label .ph-hr { flex: 1; height: 1px; background: var(--border); opacity: .6; }
+
+.agent-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; }
+
+/* Agent card */
+.agent-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius2); padding: 11px 13px;
+  cursor: pointer; transition: all .15s;
+  position: relative; overflow: hidden;
+}
+.agent-card::after {
+  content: ''; position: absolute; inset: 0; left: 0; top: 0;
+  border-radius: var(--radius2); opacity: 0;
+  transition: opacity .15s;
+}
+.agent-card:hover { border-color: var(--border2); background: var(--surface2); }
+.agent-card.selected { border-color: var(--accent); background: var(--surface2); box-shadow: 0 0 0 1px var(--accent-dim), 0 0 12px var(--accent-glow); }
+.agent-card::before {
+  content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+  border-radius: var(--radius2) var(--radius2) 0 0;
+}
+.agent-card[data-phase="Discovery"]::before           { background: var(--disc); }
+.agent-card[data-phase="Active Scanning"]::before     { background: var(--scan); }
+.agent-card[data-phase="Auth & Session"]::before      { background: var(--auth); }
+.agent-card[data-phase="Protocol & Transport"]::before { background: var(--proto); }
+
+.card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 6px; }
+.card-name { font-weight: 600; font-size: 12px; display: flex; align-items: center; gap: 5px; }
+.card-icon { font-size: 15px; }
+.status-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; margin-top: 2px;
+}
+.status-dot.pending   { background: var(--muted); }
+.status-dot.running   { background: var(--green); animation: pulse 1.2s infinite; box-shadow: 0 0 8px rgba(34,197,94,.5); }
+.status-dot.completed { background: var(--green); }
+.status-dot.error     { background: var(--red); }
+.status-dot.stopped   { background: var(--yellow); }
+/* backward compat for older class name in JS */
+.card-status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; margin-top: 2px; }
+.card-status-dot.pending   { background: var(--muted); }
+.card-status-dot.running   { background: var(--green); animation: pulse 1.2s infinite; }
+.card-status-dot.completed { background: var(--green); }
+.card-status-dot.error     { background: var(--red); }
+.card-status-dot.stopped   { background: var(--yellow); }
+
+.card-meta { display: flex; gap: 6px; margin-top: 6px; align-items: center; flex-wrap: wrap; }
+.card-stat { font-size: 10px; color: var(--muted); }
+.card-stat span { color: var(--fg2); font-weight: 600; }
+.card-findings-badge {
+  background: rgba(239,68,68,.15); color: var(--red);
+  padding: 1px 5px; border-radius: 3px; font-size: 10px; font-weight: 700;
+}
+.card-progress { height: 2px; background: var(--surface3); border-radius: 2px; margin-top: 9px; overflow: hidden; }
+.card-progress-bar { height: 100%; background: var(--accent); width: 0%; transition: width .4s; }
+
+/* pre-scan message */
+#pre-scan-msg {
+  flex: 1; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; text-align: center; padding: 40px 20px; gap: 12px;
+  color: var(--fg2);
+}
+.pre-scan-icon { font-size: 48px; opacity: .4; }
+.pre-scan-title { font-size: 16px; font-weight: 700; color: var(--fg); }
+.pre-scan-sub { font-size: 12px; color: var(--fg2); line-height: 1.6; max-width: 320px; }
+.pre-scan-tag {
+  display: inline-block; background: var(--surface3); border: 1px solid var(--border2);
+  border-radius: 4px; padding: 4px 10px; font-size: 11px; color: var(--fg2);
+  font-family: var(--mono);
+}
+
+/* ── Console panel (right of agents) ─────────────────────────────────────── */
+#console-panel-wrap {
+  width: 400px; flex-shrink: 0;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+  display: flex; flex-direction: column;
+  overflow: hidden;
+}
+.panel-tabs {
+  display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0;
+  background: var(--surface);
+}
+.panel-tab {
+  flex: 1; padding: 9px 0; text-align: center;
+  font-size: 11px; font-weight: 600; color: var(--muted);
+  cursor: pointer; border-bottom: 2px solid transparent; transition: all .15s;
+}
+.panel-tab:hover { color: var(--fg2); }
+.panel-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.panel-body { flex: 1; overflow-y: auto; }
+
+/* Console output */
+#tab-console { display: flex; flex-direction: column; height: 100%; }
+#console-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 12px 4px; border-bottom: 1px solid var(--border);
+  flex-shrink: 0; background: var(--surface2);
+}
+#console-agent-name { font-weight: 600; font-size: 12px; color: var(--fg); }
+#console-status { font-size: 10px; color: var(--muted); }
+#console-output {
+  font-family: var(--mono); font-size: 11px; line-height: 1.7;
+  padding: 8px 12px; flex: 1; overflow-y: auto;
+}
+.cout-line { padding: 0 2px; border-radius: 2px; }
+.cout-cmd    { color: var(--cyan); }
+.cout-done   { color: var(--green); font-weight: 600; }
+.cout-err    { color: var(--red); }
+.cout-adapt  { color: var(--purple); }
+.cout-shared { color: var(--yellow); }
+.cout-hint   { color: var(--muted); font-style: italic; }
+.cout-static { color: var(--yellow); }
+
+/* Findings panel */
+#tab-findings { padding: 10px; }
+.finding-item {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 9px 11px; margin-bottom: 6px;
+  transition: border-color .15s;
+}
+.finding-item:hover { border-color: var(--border2); }
+.fi-header { display: flex; gap: 8px; align-items: flex-start; }
+.fi-icon { font-size: 14px; flex-shrink: 0; margin-top: 1px; }
+.fi-text { font-size: 12px; line-height: 1.45; flex: 1; }
+.fi-meta { font-size: 10px; color: var(--muted); margin-top: 3px; }
+.fi-actions { display: flex; gap: 4px; margin-top: 6px; }
+.fi-phase-tag {
+  display: inline-block; border-radius: 3px;
+  padding: 1px 5px; font-size: 10px; font-weight: 700; margin-right: 4px;
+}
+.fi-phase-tag[data-phase="Discovery"]           { background: rgba(59,130,246,.15); color: var(--disc); }
+.fi-phase-tag[data-phase="Active Scanning"]     { background: rgba(239,68,68,.15); color: var(--scan); }
+.fi-phase-tag[data-phase="Auth & Session"]      { background: rgba(168,85,247,.15); color: var(--auth); }
+.fi-phase-tag[data-phase="Protocol & Transport"] { background: rgba(6,182,212,.15); color: var(--proto); }
+#findings-empty { color: var(--muted); font-size: 12px; padding: 32px; text-align: center; }
+
+/* Severity badges */
+.sev-badge { display: inline-block; border-radius: 3px; padding: 1px 6px; font-size: 10px; font-weight: 700; margin-right: 4px; }
+.sev-critical { background: var(--critical-dim); color: var(--critical); }
+.sev-high     { background: var(--high-dim); color: var(--high); }
+.sev-medium   { background: var(--medium-dim); color: var(--medium); }
+.sev-low      { background: var(--low-dim); color: var(--low); }
+.sev-info     { background: var(--info-dim); color: var(--info); }
+
+/* Stats panel */
+#tab-stats { padding: 14px; }
+.stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
+.stat-card {
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 10px 12px;
+}
+.stat-card-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+.stat-card-value { font-size: 22px; font-weight: 700; margin-top: 2px; }
+.stat-row2 { display: flex; justify-content: space-between; align-items: center;
+             padding: 7px 0; border-bottom: 1px solid var(--border); }
+.stat-row2:last-child { border-bottom: none; }
+.stat-label2 { color: var(--fg2); font-size: 12px; }
+.stat-value2 { font-size: 13px; font-weight: 700; }
+.stat-section-title { font-size: 10px; font-weight: 700; text-transform: uppercase;
+                      letter-spacing: .8px; color: var(--muted); padding: 10px 0 4px; }
+
+/* ── Overview section ────────────────────────────────────────────────────── */
+#section-overview { padding: 16px; overflow-y: auto; }
+.overview-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; margin-bottom: 20px; }
+.ov-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius2); padding: 14px 16px;
+  position: relative; overflow: hidden;
+}
+.ov-card-accent { position: absolute; top: 0; left: 0; right: 0; height: 2px; }
+.ov-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; margin-bottom: 6px; }
+.ov-value { font-size: 28px; font-weight: 800; line-height: 1; }
+.ov-sub   { font-size: 11px; color: var(--fg2); margin-top: 4px; }
+.ov-icon  { position: absolute; right: 14px; top: 14px; font-size: 22px; opacity: .15; }
+
+.ov-section-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px;
+                    color: var(--muted); padding-bottom: 8px; border-bottom: 1px solid var(--border);
+                    margin-bottom: 10px; }
+
+/* Severity breakdown bar */
+.sev-bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; gap: 1px; margin: 8px 0 4px; }
+.sev-seg { height: 100%; transition: width .5s; }
+.sev-legend { display: flex; gap: 10px; flex-wrap: wrap; }
+.sev-legend-item { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--fg2); }
+.sev-dot { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+
+/* Engine status summary */
+.engine-summary { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+.engine-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 10px 12px;
+  display: flex; align-items: center; gap: 10px;
+}
+.engine-card-icon { font-size: 18px; flex-shrink: 0; }
+.engine-card-body {}
+.engine-card-name { font-size: 11px; font-weight: 600; color: var(--fg2); }
+.engine-card-val { font-size: 13px; font-weight: 700; color: var(--fg); }
+
+/* ── Engine section ──────────────────────────────────────────────────────── */
+#section-engine { overflow-y: auto; }
+.engine-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 14px; }
+.engine-block {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius2); overflow: hidden;
+}
+.engine-block-header {
+  padding: 10px 14px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+  background: var(--surface2);
+}
+.engine-block-title {
+  font-size: 12px; font-weight: 700; display: flex; align-items: center; gap: 8px;
+}
+.engine-block-body { padding: 14px; }
+.field { margin-bottom: 10px; }
+.field-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; margin-bottom: 4px; }
+.field-input {
+  width: 100%; background: var(--surface3); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 7px 10px; color: var(--fg); outline: none;
+  font-size: 12px; font-family: inherit;
+  transition: border-color .15s;
+}
+.field-input:focus { border-color: var(--accent); }
+.field-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.field-mini {
+  background: var(--surface3); border: 1px solid var(--border);
+  border-radius: 4px; padding: 4px 8px; color: var(--fg); outline: none;
+  font-size: 11px; font-family: inherit;
+}
+.field-mini:focus { border-color: var(--accent); }
+select.field-mini { cursor: pointer; }
+
+/* Engine run-status bar */
+.run-bar {
+  display: flex; align-items: center; gap: 8px; margin-top: 10px;
+  padding-top: 10px; border-top: 1px solid var(--border);
+}
+.run-status { font-size: 11px; color: var(--muted); flex: 1; }
+.run-count  { font-size: 11px; font-weight: 700; color: var(--accent); }
+
+/* Result list (passive findings, forced browse) */
+.result-list { margin-top: 10px; max-height: 160px; overflow-y: auto; }
+.result-item {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 11px;
+}
+.result-item:last-child { border-bottom: none; }
+.result-code {
+  flex-shrink: 0; font-family: var(--mono); font-size: 10px;
+  padding: 1px 5px; border-radius: 3px; font-weight: 700;
+}
+.code-200 { background: var(--low-dim); color: var(--green); }
+.code-301,.code-302,.code-307,.code-308 { background: var(--info-dim); color: var(--cyan); }
+.code-401,.code-403 { background: var(--medium-dim); color: var(--yellow); }
+.code-500,.code-503 { background: var(--critical-dim); color: var(--red); }
+.code-other { background: var(--surface3); color: var(--fg2); }
+
+/* ── Tools section ───────────────────────────────────────────────────────── */
+#section-tools { overflow-y: auto; }
+.tools-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 14px; }
+.tool-block {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius2); overflow: hidden;
+}
+.tool-block-header {
+  padding: 10px 14px; border-bottom: 1px solid var(--border);
+  background: var(--surface2);
+  display: flex; align-items: center; justify-content: space-between;
+}
+.tool-block-title { font-size: 12px; font-weight: 700; display: flex; align-items: center; gap: 7px; }
+.tool-block-body { padding: 14px; }
+.tool-status { font-size: 11px; color: var(--muted); margin: 6px 0; min-height: 16px; }
+.tool-hint { font-size: 10px; color: var(--muted); line-height: 1.5; margin-top: 6px; }
+.tool-hint code { color: var(--cyan); font-family: var(--mono); background: var(--surface3); padding: 0 3px; border-radius: 2px; }
+
+/* Capabilities grid */
+.cap-grid { display: flex; flex-direction: column; gap: 4px; }
+.cap-row { display: flex; align-items: center; justify-content: space-between; font-size: 11px; padding: 4px 0; border-bottom: 1px solid var(--border); }
+.cap-row:last-child { border-bottom: none; }
+.cap-name { color: var(--fg2); }
+.cap-tick-yes { color: var(--green); font-weight: 700; }
+.cap-tick-no  { color: var(--muted); }
+.cap-count { color: var(--accent); font-weight: 700; }
+
+/* Agent tuning */
+.tune-list { display: flex; flex-direction: column; gap: 2px; max-height: 240px; overflow-y: auto; }
+.tune-row {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 0; border-bottom: 1px solid var(--border); font-size: 11px;
+}
+.tune-row:last-child { border-bottom: none; }
+
+/* ── Reports section ─────────────────────────────────────────────────────── */
+#section-reports { padding: 16px; overflow-y: auto; }
+.reports-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+.report-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius2); padding: 18px 16px;
+  cursor: pointer; transition: all .15s; text-align: center;
+}
+.report-card:hover { border-color: var(--border2); background: var(--surface2); transform: translateY(-1px); box-shadow: var(--shadow); }
+.report-card-icon { font-size: 32px; margin-bottom: 10px; }
+.report-card-name { font-size: 13px; font-weight: 700; color: var(--fg); margin-bottom: 4px; }
+.report-card-desc { font-size: 11px; color: var(--fg2); }
+
+/* ── Modals ───────────────────────────────────────────────────────────────── */
+.modal-overlay {
+  display: none; position: fixed; inset: 0;
+  background: rgba(0,0,0,.7); z-index: 500;
+  align-items: center; justify-content: center;
+  backdrop-filter: blur(2px);
+}
+.modal-overlay.open { display: flex; }
+#modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.75); z-index: 500; align-items: center; justify-content: center; backdrop-filter: blur(2px); }
+#modal-overlay.open { display: flex; }
+
+.modal {
+  background: var(--surface); border: 1px solid var(--border2);
+  border-radius: var(--radius2); padding: 22px 24px;
+  width: 460px; max-width: 95vw; box-shadow: var(--shadow-lg);
+}
+#modal { background: var(--surface); border: 1px solid var(--border2); border-radius: var(--radius2); padding: 22px 24px; width: 460px; max-width: 95vw; box-shadow: var(--shadow-lg); }
+.modal-title { font-size: 15px; font-weight: 700; margin-bottom: 18px; display: flex; align-items: center; gap: 8px; }
+.modal-divider { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.field-group { margin-bottom: 14px; }
+.field-hint { font-size: 10px; color: var(--muted); margin-top: 3px; }
+.field-label-modal { font-size: 11px; color: var(--fg2); margin-bottom: 4px; }
+
+/* ── Toast ───────────────────────────────────────────────────────────────── */
+#toast-wrap { position: fixed; bottom: 20px; right: 20px; z-index: 999; display: flex; flex-direction: column; gap: 6px; pointer-events: none; }
+.toast-item {
+  background: var(--surface3); border: 1px solid var(--border2);
+  border-radius: var(--radius); padding: 8px 14px;
+  font-size: 12px; color: var(--fg);
+  animation: toast-in .2s ease; pointer-events: all;
+  box-shadow: var(--shadow);
+}
+.toast-item.err { border-color: rgba(239,68,68,.5); color: var(--red); }
+.toast-item.ok  { border-color: rgba(34,197,94,.5); color: var(--green); }
+@keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+/* ── Fabric modal ────────────────────────────────────────────────────────── */
+#fabric-overlay {
+  display: none; position: fixed; inset: 0;
+  background: rgba(0,0,0,.8); z-index: 600;
+  align-items: center; justify-content: center;
+  backdrop-filter: blur(3px);
+}
+.fabric-modal {
+  background: var(--surface); border: 1px solid var(--border2);
+  border-radius: var(--radius2); padding: 20px 24px;
+  width: 600px; max-width: 95vw; max-height: 88vh;
+  display: flex; flex-direction: column; gap: 12px;
+  box-shadow: var(--shadow-lg);
+}
+
+/* ── Dividers / separators ───────────────────────────────────────────────── */
+.hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+
+/* ── Scrollable area ─────────────────────────────────────────────────────── */
+.scroll { overflow-y: auto; }
+
+/* ── Status dot in tools ─────────────────────────────────────────────────── */
+.tool-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 4px; }
+.tool-dot.on  { background: var(--green); box-shadow: 0 0 6px rgba(34,197,94,.5); }
+.tool-dot.off { background: var(--muted); }
+
+/* ── Misc helpers ────────────────────────────────────────────────────────── */
+.mono { font-family: var(--mono); }
+.dimmed { color: var(--muted); }
+.text-accent { color: var(--accent); }
+.text-green  { color: var(--green); }
+.text-red    { color: var(--red); }
+.text-yellow { color: var(--yellow); }
+.flex-row { display: flex; align-items: center; gap: 8px; }
+.flex-1 { flex: 1; }
+.gap-4  { gap: 4px; }
+.gap-6  { gap: 6px; }
+.mt-6   { margin-top: 6px; }
+.mt-10  { margin-top: 10px; }
+.mb-6   { margin-bottom: 6px; }
+.full-width { grid-column: 1 / -1; }
+</style>
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ═══════════════ SIDEBAR ═══════════════ -->
+  <nav id="sidebar">
+    <div class="sidebar-logo" title="DAST Platform">🛡</div>
+
+    <div class="nav-item active" data-section="overview" onclick="switchSection('overview')">
+      🏠 <span class="nav-tip">Overview</span>
+    </div>
+    <div class="nav-item" data-section="agents" onclick="switchSection('agents')">
+      🤖 <span class="nav-tip">AI Agents</span>
+    </div>
+    <div class="nav-divider"></div>
+    <div class="nav-item" data-section="engine" onclick="switchSection('engine')">
+      ⚙️ <span class="nav-tip">Scan Engine</span>
+    </div>
+    <div class="nav-item" data-section="tools" onclick="switchSection('tools')">
+      🔧 <span class="nav-tip">Tools</span>
+    </div>
+    <div class="nav-divider"></div>
+    <div class="nav-item" data-section="reports" onclick="switchSection('reports')">
+      📊 <span class="nav-tip">Reports</span>
+    </div>
+    <div class="nav-spacer"></div>
+    <div class="nav-item" onclick="openSettings()" title="Settings">
+      ⚙ <span class="nav-tip">Settings</span>
+    </div>
+  </nav>
+
+  <!-- ═══════════════ HEADER ═══════════════ -->
+  <header id="header">
+    <div>
+      <div class="brand"><span class="brand-accent">DAST</span> Platform</div>
+      <div class="brand-sub">AI Security Scanner</div>
+    </div>
+
+    <div class="target-wrap">
+      <span class="target-icon">🎯</span>
+      <input id="target-input" type="text"
+             placeholder="https://target.example.com"
+             autocomplete="off" spellcheck="false" />
+    </div>
+
+    <div class="hdr-right">
+      <div id="scan-progress" title="Scan progress">
+        <div id="scan-progress-bar"></div>
+      </div>
+      <span id="status-label">Ready</span>
+
+      <span class="badge badge-static" id="badge-mode" style="display:none">STATIC</span>
+      <span class="badge badge-running" id="badge-running" style="display:none">
+        <span class="badge-dot"></span> <span id="badge-run-txt">0</span> running
+      </span>
+      <span class="badge badge-findings" id="badge-findings" style="display:none">
+        <span id="badge-find-txt">0</span> findings
+      </span>
+
+      <button class="btn-scan" id="btn-launch" onclick="scanLaunch()">▶ Scan</button>
+      <button class="btn-stop btn-sm" id="btn-stop" onclick="scanStop()" style="display:none">■ Stop</button>
+    </div>
+  </header>
+
+  <!-- ═══════════════ MAIN ═══════════════ -->
+  <main id="main">
+
+    <!-- ─── OVERVIEW ─── -->
+    <div id="section-overview" class="section active">
+      <div class="section-header">
+        <div class="section-title">🏠 Overview</div>
+        <div class="section-subtitle">Scan dashboard and system status</div>
+      </div>
+      <div style="padding:14px; overflow-y:auto; flex:1;">
+
+        <!-- KPI row -->
+        <div class="overview-grid">
+          <div class="ov-card">
+            <div class="ov-card-accent" style="background:var(--red)"></div>
+            <div class="ov-icon">🔴</div>
+            <div class="ov-label">Critical</div>
+            <div class="ov-value text-red" id="ov-critical">0</div>
+            <div class="ov-sub">high-impact findings</div>
+          </div>
+          <div class="ov-card">
+            <div class="ov-card-accent" style="background:var(--orange)"></div>
+            <div class="ov-icon">🔥</div>
+            <div class="ov-label">High</div>
+            <div class="ov-value" style="color:var(--high)" id="ov-high">0</div>
+            <div class="ov-sub">high severity</div>
+          </div>
+          <div class="ov-card">
+            <div class="ov-card-accent" style="background:var(--yellow)"></div>
+            <div class="ov-icon">⚠️</div>
+            <div class="ov-label">Medium</div>
+            <div class="ov-value text-yellow" id="ov-medium">0</div>
+            <div class="ov-sub">medium severity</div>
+          </div>
+          <div class="ov-card">
+            <div class="ov-card-accent" style="background:var(--accent)"></div>
+            <div class="ov-icon">🤖</div>
+            <div class="ov-label">Agents</div>
+            <div class="ov-value text-accent" id="ov-agents">0</div>
+            <div class="ov-sub" id="ov-agents-sub">enabled</div>
+          </div>
+        </div>
+
+        <!-- Severity bar -->
+        <div style="background:var(--surface); border:1px solid var(--border); border-radius:var(--radius2); padding:14px 16px; margin-bottom:14px;">
+          <div class="ov-section-title">Severity Distribution</div>
+          <div class="sev-bar" id="ov-sev-bar">
+            <div class="sev-seg" style="background:var(--critical); width:0%" id="sb-critical"></div>
+            <div class="sev-seg" style="background:var(--high); width:0%" id="sb-high"></div>
+            <div class="sev-seg" style="background:var(--medium); width:0%" id="sb-medium"></div>
+            <div class="sev-seg" style="background:var(--low); width:0%" id="sb-low"></div>
+            <div class="sev-seg" style="background:var(--info); width:0%" id="sb-info"></div>
+          </div>
+          <div class="sev-legend">
+            <div class="sev-legend-item"><span class="sev-dot" style="background:var(--critical)"></span> Critical (<span id="sl-critical">0</span>)</div>
+            <div class="sev-legend-item"><span class="sev-dot" style="background:var(--high)"></span> High (<span id="sl-high">0</span>)</div>
+            <div class="sev-legend-item"><span class="sev-dot" style="background:var(--medium)"></span> Medium (<span id="sl-medium">0</span>)</div>
+            <div class="sev-legend-item"><span class="sev-dot" style="background:var(--low)"></span> Low (<span id="sl-low">0</span>)</div>
+            <div class="sev-legend-item"><span class="sev-dot" style="background:var(--info)"></span> Info (<span id="sl-info">0</span>)</div>
+          </div>
+        </div>
+
+        <!-- Engine status -->
+        <div style="background:var(--surface); border:1px solid var(--border); border-radius:var(--radius2); padding:14px 16px; margin-bottom:14px;">
+          <div class="ov-section-title">Engine Modules</div>
+          <div class="engine-summary" id="ov-engine-summary">
+            <div class="engine-card"><span class="engine-card-icon">🕸</span><div class="engine-card-body"><div class="engine-card-name">Spider</div><div class="engine-card-val dimmed">—</div></div></div>
+            <div class="engine-card"><span class="engine-card-icon">🛡</span><div class="engine-card-body"><div class="engine-card-name">Passive Scan</div><div class="engine-card-val dimmed">—</div></div></div>
+            <div class="engine-card"><span class="engine-card-icon">📂</span><div class="engine-card-body"><div class="engine-card-name">Forced Browse</div><div class="engine-card-val dimmed">—</div></div></div>
+            <div class="engine-card"><span class="engine-card-icon">📋</span><div class="engine-card-body"><div class="engine-card-name">OpenAPI</div><div class="engine-card-val dimmed">—</div></div></div>
+          </div>
+        </div>
+
+        <!-- Quick actions -->
+        <div style="background:var(--surface); border:1px solid var(--border); border-radius:var(--radius2); padding:14px 16px;">
+          <div class="ov-section-title">Quick Actions</div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <button class="btn-ghost btn-sm btn-export" onclick="exportFindings()">⬇ Export JSON</button>
+            <button class="btn-ghost btn-sm" style="color:var(--accent); border-color:var(--accent-dim);" onclick="openReport()">📄 HTML Report</button>
+            <button class="btn-ghost btn-sm" onclick="downloadSarif()">📋 SARIF</button>
+            <button class="btn-ghost btn-sm" onclick="downloadXml()">📋 XML</button>
+            <button class="btn-ghost btn-sm btn-fabric" onclick="openFabricSummary()">🧵 Fabric Analysis</button>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ─── AGENTS ─── -->
+    <div id="section-agents" class="section">
+      <!-- Phase filter bar -->
+      <div id="phase-bar">
+        <div class="phase-tab active" data-phase="all" onclick="setPhaseFilter('all')">
+          <span class="ph-dot" style="background:var(--fg2)"></span>All
+        </div>
+        <div class="phase-tab" data-phase="Discovery" onclick="setPhaseFilter('Discovery')">
+          <span class="ph-dot"></span>Discovery <span class="phase-count" id="cnt-disc">7</span>
+        </div>
+        <div class="phase-tab" data-phase="Active Scanning" onclick="setPhaseFilter('Active Scanning')">
+          <span class="ph-dot"></span>Active Scanning <span class="phase-count" id="cnt-scan">8</span>
+        </div>
+        <div class="phase-tab" data-phase="Auth & Session" onclick="setPhaseFilter('Auth & Session')">
+          <span class="ph-dot"></span>Auth &amp; Session <span class="phase-count" id="cnt-auth">5</span>
+        </div>
+        <div class="phase-tab" data-phase="Protocol & Transport" onclick="setPhaseFilter('Protocol & Transport')">
+          <span class="ph-dot"></span>Protocol <span class="phase-count" id="cnt-proto">4</span>
+        </div>
+      </div>
+
+      <div id="agent-workspace">
+        <!-- Agent grid -->
+        <div id="agent-grid-wrap">
+          <div id="pre-scan-msg">
+            <div class="pre-scan-icon">🔬</div>
+            <div class="pre-scan-title">29 Specialist DAST Agents Ready</div>
+            <div class="pre-scan-sub">Enter a target URL and click <strong>Scan</strong>. AI mode uses LLM-guided adaptive scanning. Static mode works without an API key.</div>
+            <span class="pre-scan-tag">python3 main.py --headless --target http://TARGET</span>
+          </div>
+          <div id="agent-grid"></div>
+        </div>
+
+        <!-- Console / Findings / Stats panel -->
+        <div id="console-panel-wrap">
+          <div class="panel-tabs">
+            <div class="panel-tab active" data-tab="console" onclick="switchTab('console')">Console</div>
+            <div class="panel-tab" data-tab="findings" onclick="switchTab('findings')">Findings <span id="findings-count-tab" style="color:var(--red)"></span></div>
+            <div class="panel-tab" data-tab="stats" onclick="switchTab('stats')">Stats</div>
+            <div class="panel-tab" data-tab="tools" onclick="switchTab('tools')" style="display:none">Tools</div>
+          </div>
+          <div class="panel-body">
+
+            <!-- Console -->
+            <div id="tab-console" style="display:flex; flex-direction:column; height:100%;">
+              <div id="console-header">
+                <span id="console-agent-name" class="dimmed">Select an agent</span>
+                <span id="console-status" class="dimmed"></span>
+              </div>
+              <div id="console-output">
+                <div id="console-empty" style="color:var(--muted);font-size:12px;padding:32px;text-align:center;">Click an agent card to view its output</div>
+              </div>
+            </div>
+
+            <!-- Findings -->
+            <div id="tab-findings" style="display:none">
+              <div id="findings-panel" style="padding:10px;">
+                <div id="findings-empty">No findings yet — start a scan</div>
+                <div id="findings-list"></div>
+              </div>
+            </div>
+
+            <!-- Stats -->
+            <div id="tab-stats" style="display:none">
+              <div id="stats-panel" style="padding:14px;">
+                <div class="stats-grid" style="margin-bottom:10px;">
+                  <div class="stat-card">
+                    <div class="stat-card-label">Running</div>
+                    <div class="stat-card-value text-accent" id="st-running">0</div>
+                  </div>
+                  <div class="stat-card">
+                    <div class="stat-card-label">Findings</div>
+                    <div class="stat-card-value text-red" id="st-findings">0</div>
+                  </div>
+                </div>
+                <div class="stat-row2"><span class="stat-label2">Target</span><span class="stat-value2 mono" id="st-target" style="font-size:10px;color:var(--fg2);">—</span></div>
+                <div class="stat-row2"><span class="stat-label2">Total Agents</span><span class="stat-value2" id="st-total">0</span></div>
+                <div class="stat-row2"><span class="stat-label2">Completed</span><span class="stat-value2 text-green" id="st-done">0</span></div>
+                <div class="stat-row2"><span class="stat-label2">Pending</span><span class="stat-value2 dimmed" id="st-pending">0</span></div>
+                <div class="stat-section-title">By Severity</div>
+                <div class="stat-row2"><span class="stat-label2">🔴 Critical</span><span class="stat-value2" style="color:var(--critical)" id="st-critical">0</span></div>
+                <div class="stat-row2"><span class="stat-label2">🟠 High</span><span class="stat-value2" style="color:var(--high)" id="st-high">0</span></div>
+                <div class="stat-row2"><span class="stat-label2">🟡 Medium</span><span class="stat-value2 text-yellow" id="st-medium">0</span></div>
+                <div class="stat-row2"><span class="stat-label2">🟢 Low</span><span class="stat-value2 text-green" id="st-low">0</span></div>
+                <div class="stat-row2"><span class="stat-label2">🔵 Info</span><span class="stat-value2 text-accent" id="st-info">0</span></div>
+              </div>
+            </div>
+
+            <!-- Tools (hidden tab — kept for JS compat) -->
+            <div id="tab-tools" style="display:none"></div>
+
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── ENGINE ─── -->
+    <div id="section-engine" class="section">
+      <div class="section-header">
+        <div class="section-title">⚙️ Scan Engine</div>
+        <div class="section-subtitle">Crawlers, passive scanner, forced browse — no API key required</div>
+      </div>
+      <div class="engine-layout">
+
+        <!-- Traditional Spider -->
+        <div class="engine-block">
+          <div class="engine-block-header">
+            <div class="engine-block-title">🕸 Traditional Spider</div>
+            <div class="flex-row">
+              <button class="btn-ghost btn-xs" id="btn-spider-start" onclick="startSpider()">▶ Start</button>
+              <button class="btn-ghost btn-xs" id="btn-spider-stop" onclick="stopSpider()" style="display:none; color:var(--red);">■ Stop</button>
+            </div>
+          </div>
+          <div class="engine-block-body">
+            <div class="field-row mb-6">
+              <span class="dimmed" style="font-size:11px">Depth:</span>
+              <input class="field-mini" id="spider-depth" type="number" value="5" min="1" max="20" style="width:48px;" />
+              <span class="dimmed" style="font-size:11px">Max URLs:</span>
+              <input class="field-mini" id="spider-maxurls" type="number" value="0" min="0" style="width:56px;" title="0 = unlimited" />
+              <select class="field-mini" id="spider-scope">
+                <option value="domain">Domain</option>
+                <option value="path">Path</option>
+              </select>
+            </div>
+            <div class="run-bar">
+              <span class="run-status" id="spider-status">Idle</span>
+              <span class="run-count" id="spider-count">0 URLs</span>
+              <button class="btn-ghost btn-xs" onclick="viewSpiderResults()">⬇ Export</button>
+            </div>
+            <div class="tool-hint">HTML-only crawler — follows &lt;a&gt;, &lt;form&gt;, &lt;script&gt; etc. No JS execution.</div>
+          </div>
+        </div>
+
+        <!-- AJAX Spider -->
+        <div class="engine-block">
+          <div class="engine-block-header">
+            <div class="engine-block-title">🕷 AJAX Spider</div>
+            <div class="flex-row">
+              <button class="btn-ghost btn-xs" id="btn-ajax" onclick="runAjaxCrawl()">▶ Start</button>
+            </div>
+          </div>
+          <div class="engine-block-body">
+            <div class="run-bar mt-6">
+              <span class="run-status" id="ajax-status">Idle — awaiting start</span>
+            </div>
+            <div class="tool-hint" style="margin-top:10px;">Headless Chromium (Playwright) — discovers SPA routes, XHR endpoints, dynamic forms.<br/>Requires: <code>pip install playwright &amp;&amp; playwright install chromium</code></div>
+          </div>
+        </div>
+
+        <!-- Passive Scanner -->
+        <div class="engine-block">
+          <div class="engine-block-header">
+            <div class="engine-block-title">🛡 Passive Scanner</div>
+            <div class="flex-row">
+              <button class="btn-ghost btn-xs" onclick="runPassiveScan()">▶ Scan</button>
+              <button class="btn-ghost btn-xs" onclick="loadPassiveFindings()">↻</button>
+            </div>
+          </div>
+          <div class="engine-block-body">
+            <div class="tool-hint">Zero-payload analysis of HTTP responses — checks security headers, CORS, cookies, info leaks, error messages.</div>
+            <div class="run-bar">
+              <span class="run-status" id="passive-status">Idle</span>
+              <span class="run-count" id="passive-count">0 findings</span>
+            </div>
+            <div class="result-list" id="passive-results-list"></div>
+          </div>
+        </div>
+
+        <!-- Forced Browse -->
+        <div class="engine-block">
+          <div class="engine-block-header">
+            <div class="engine-block-title">📂 Forced Browse</div>
+            <div class="flex-row">
+              <button class="btn-ghost btn-xs" id="btn-forcebrowse" onclick="startForceBrowse()">▶ Start</button>
+              <button class="btn-ghost btn-xs" id="btn-forcebrowse-stop" onclick="stopForceBrowse()" style="display:none; color:var(--red);">■ Stop</button>
+            </div>
+          </div>
+          <div class="engine-block-body">
+            <div class="tool-hint">DirBuster-style hidden path discovery with 2000-entry built-in wordlist. No external wordlist needed.</div>
+            <div class="run-bar">
+              <span class="run-status" id="fb-status">Idle</span>
+              <span class="run-count" id="fb-count">0 paths</span>
+              <button class="btn-ghost btn-xs" onclick="viewBrowseResults()">⬇ Export</button>
+            </div>
+            <div class="result-list" id="fb-results-list"></div>
+          </div>
+        </div>
+
+        <!-- OpenAPI Import (full width) -->
+        <div class="engine-block full-width">
+          <div class="engine-block-header">
+            <div class="engine-block-title">📋 OpenAPI / Swagger Import</div>
+            <div class="flex-row">
+              <span id="openapi-epcount" class="text-accent" style="font-size:11px; font-weight:700;"></span>
+            </div>
+          </div>
+          <div class="engine-block-body">
+            <div class="field-row mb-6">
+              <input class="field-input flex-1" id="openapi-url" type="text"
+                     placeholder="https://petstore.swagger.io/v2/swagger.json or /path/to/spec.json"
+                     autocomplete="off" />
+              <button class="btn-ghost btn-sm" id="btn-openapi-import" onclick="importOpenApi()">⬇ Import</button>
+              <button class="btn-ghost btn-xs" onclick="viewOpenApiEndpoints()" title="Export endpoint list">👁 Endpoints</button>
+            </div>
+            <div class="flex-row">
+              <span class="tool-status" id="openapi-status"></span>
+              <span id="openapi-title" style="font-size:11px; font-weight:600; color:var(--fg2);"></span>
+            </div>
+            <div id="openapi-results" style="display:none;"></div>
+            <div class="tool-hint">Supports OpenAPI 3.x &amp; Swagger 2.0 — JSON always, YAML needs <code>pip install pyyaml</code>. All endpoints added to site map for agent targeting.</div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ─── TOOLS ─── -->
+    <div id="section-tools" class="section">
+      <div class="section-header">
+        <div class="section-title">🔧 Tools</div>
+        <div class="section-subtitle">Proxy, OAST, authentication, agent tuning</div>
+      </div>
+      <div class="tools-layout">
+
+        <!-- Proxy Engine -->
+        <div class="tool-block">
+          <div class="tool-block-header">
+            <div class="tool-block-title">🔌 Proxy Engine (mitmproxy)</div>
+            <div class="flex-row">
+              <span class="tool-dot off" id="proxy-dot"></span>
+              <span id="proxy-label" style="font-size:11px; color:var(--muted);">Not running</span>
+            </div>
+          </div>
+          <div class="tool-block-body">
+            <div class="field-row mb-6">
+              <span class="dimmed" style="font-size:11px;">Port:</span>
+              <input class="field-mini" id="proxy-port-inp" type="number" value="8090" min="1024" max="65535" style="width:68px;" />
+              <button class="btn-ghost btn-xs" id="btn-proxy" onclick="toggleProxy()">Start Proxy</button>
+            </div>
+            <div class="flex-row">
+              <span class="dimmed" style="font-size:11px;">Captured URLs:</span>
+              <span id="sitemap-count" class="text-accent" style="font-weight:700; font-size:12px;">0</span>
+              <button class="btn-ghost btn-xs" onclick="exportSitemap()">⬇ Export</button>
+            </div>
+            <div class="tool-hint">Configure browser proxy to <code>localhost:&lt;port&gt;</code> to capture traffic and populate the site map.</div>
+          </div>
+        </div>
+
+        <!-- OAST Server -->
+        <div class="tool-block">
+          <div class="tool-block-header">
+            <div class="tool-block-title">📡 OAST Listener</div>
+            <div class="flex-row">
+              <button class="btn-ghost btn-xs" onclick="startOAST()">▶ Start</button>
+              <button class="btn-ghost btn-xs" onclick="viewOASTCallbacks()">👁 Callbacks</button>
+              <button class="btn-ghost btn-xs" onclick="clearOAST()">✕ Clear</button>
+            </div>
+          </div>
+          <div class="tool-block-body">
+            <div class="tool-status" id="oast-status">Not started</div>
+            <div id="oast-url-display" style="font-family:var(--mono); font-size:10px; color:var(--cyan); margin-bottom:6px;"></div>
+            <div class="flex-row">
+              <span class="dimmed" style="font-size:11px;">Callbacks:</span>
+              <span id="oast-count" class="text-accent" style="font-weight:700; font-size:12px;">0</span>
+            </div>
+            <div class="tool-hint">Out-of-band listener for blind SSRF, XXE, blind XSS, SSTI. Uses stdlib — no external tools. Server must be reachable from target.</div>
+          </div>
+        </div>
+
+        <!-- Auth Login Config -->
+        <div class="tool-block">
+          <div class="tool-block-header">
+            <div class="tool-block-title">🔐 Auth / Login Config</div>
+            <div class="flex-row">
+              <button class="btn-ghost btn-xs" onclick="saveLoginConfig()">💾 Save</button>
+              <button class="btn-ghost btn-xs" id="btn-login-exec" onclick="executeLogin()">🔑 Login</button>
+            </div>
+          </div>
+          <div class="tool-block-body">
+            <div class="field">
+              <div class="field-label">Login URL</div>
+              <input class="field-input" id="login-url" type="text" placeholder="https://example.com/login" autocomplete="off" />
+            </div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+              <div class="field">
+                <div class="field-label">Username field</div>
+                <input class="field-input" id="login-user-field" type="text" placeholder="username" />
+              </div>
+              <div class="field">
+                <div class="field-label">Password field</div>
+                <input class="field-input" id="login-pass-field" type="text" placeholder="password" />
+              </div>
+              <div class="field">
+                <div class="field-label">Username value</div>
+                <input class="field-input" id="login-user" type="text" placeholder="admin" autocomplete="off" />
+              </div>
+              <div class="field">
+                <div class="field-label">Password</div>
+                <input class="field-input" id="login-pass" type="password" placeholder="••••••••" autocomplete="off" />
+              </div>
+            </div>
+            <div class="tool-status" id="login-status"></div>
+          </div>
+        </div>
+
+        <!-- Agent Tuning -->
+        <div class="tool-block">
+          <div class="tool-block-header">
+            <div class="tool-block-title">⚙ Agent Tuning</div>
+          </div>
+          <div class="tool-block-body">
+            <div class="tool-hint" style="margin-bottom:8px;">Enable/disable agents and set intensity (low=5, medium=10, high=20 iterations).</div>
+            <div id="agent-tuning-list" class="tune-list" style="color:var(--muted); font-size:11px;">Loading…</div>
+          </div>
+        </div>
+
+        <!-- Capabilities (full width) -->
+        <div class="tool-block full-width">
+          <div class="tool-block-header">
+            <div class="tool-block-title">📡 System Capabilities</div>
+            <button class="btn-ghost btn-xs" onclick="loadCapabilitiesStatus()">↻ Refresh</button>
+          </div>
+          <div class="tool-block-body">
+            <div id="capabilities-status" class="cap-grid">
+              <div class="dimmed" style="font-size:11px;">Loading…</div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ─── REPORTS ─── -->
+    <div id="section-reports" class="section">
+      <div class="section-header">
+        <div class="section-title">📊 Reports &amp; Exports</div>
+        <div class="section-subtitle">Download scan results in multiple formats</div>
+      </div>
+      <div style="padding:16px; overflow-y:auto;">
+        <div class="reports-grid">
+          <div class="report-card" onclick="exportFindings()">
+            <div class="report-card-icon">📦</div>
+            <div class="report-card-name">JSON Export</div>
+            <div class="report-card-desc">Machine-readable findings with full metadata and evidence</div>
+          </div>
+          <div class="report-card" onclick="openReport()">
+            <div class="report-card-icon">📄</div>
+            <div class="report-card-name">HTML Report</div>
+            <div class="report-card-desc">Human-readable interactive security report</div>
+          </div>
+          <div class="report-card" onclick="downloadSarif()">
+            <div class="report-card-icon">🔗</div>
+            <div class="report-card-name">SARIF 2.1.0</div>
+            <div class="report-card-desc">Import into GitHub / GitLab Code Security</div>
+          </div>
+          <div class="report-card" onclick="downloadXml()">
+            <div class="report-card-icon">🗃</div>
+            <div class="report-card-name">XML Report</div>
+            <div class="report-card-desc">ZAP-compatible XML format for CI/CD pipelines</div>
+          </div>
+          <div class="report-card" onclick="exportSitemap()">
+            <div class="report-card-icon">🗺</div>
+            <div class="report-card-name">Site Map</div>
+            <div class="report-card-desc">All discovered URLs from crawler and proxy</div>
+          </div>
+          <div class="report-card" onclick="openFabricSummary()">
+            <div class="report-card-icon">🧵</div>
+            <div class="report-card-name">Fabric Analysis</div>
+            <div class="report-card-desc">AI-powered finding analysis and executive summary</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- ═══════════════ SETTINGS MODAL ═══════════════ -->
+<div id="modal-overlay">
+  <div id="modal">
+    <div class="modal-title">⚙ Settings</div>
+
+    <div class="field-group">
+      <div class="field-label-modal">OpenAI API Key</div>
+      <input class="field-input" id="inp-openai" type="password" placeholder="sk-..." autocomplete="off" />
+    </div>
+    <div class="field-group">
+      <div class="field-label-modal">Anthropic API Key</div>
+      <input class="field-input" id="inp-anthropic" type="password" placeholder="sk-ant-..." autocomplete="off" />
+      <div class="field-hint">Leave both blank to run in static mode (no AI required).</div>
+    </div>
+
+    <hr class="modal-divider" />
+
+    <div class="field-group">
+      <div class="field-label-modal">Auth Header (optional)</div>
+      <input class="field-input" id="inp-auth" type="text" placeholder="Authorization: Bearer eyJ..." autocomplete="off" />
+      <div class="field-hint">Injected into agent prompts for authenticated endpoint testing.</div>
+    </div>
+    <div class="field-group">
+      <div class="field-label-modal">Max Concurrent Agents</div>
+      <input class="field-input" id="inp-concurrent" type="number" value="5" min="1" max="29" style="max-width:80px;" />
+      <div class="field-hint">How many agents run in parallel. Default 5.</div>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn-ghost" onclick="closeSettings()">Cancel</button>
+      <button class="btn-scan btn-sm" onclick="saveSettings()">Save Settings</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ FABRIC MODAL ═══════════════ -->
+<div id="fabric-overlay">
+  <div class="fabric-modal">
+    <div style="display:flex; align-items:center; justify-content:space-between;">
+      <div style="font-size:15px; font-weight:700; display:flex; align-items:center; gap:8px;">🧵 Fabric Analysis</div>
+      <button class="btn-ghost btn-xs" onclick="closeFabric()">✕ Close</button>
+    </div>
+    <div style="font-size:11px; color:var(--muted);" id="fabric-input-label">Input:</div>
+    <div id="fabric-input-preview" style="font-family:var(--mono); font-size:11px;
+         background:var(--surface2); border:1px solid var(--border); border-radius:var(--radius);
+         padding:8px 10px; max-height:90px; overflow-y:auto; color:var(--fg2);
+         white-space:pre-wrap;"></div>
+    <div style="font-size:11px; color:var(--muted);">Pattern:</div>
+    <div id="fabric-pattern-grid" style="display:grid; grid-template-columns:1fr 1fr; gap:6px; max-height:160px; overflow-y:auto;"></div>
+    <div style="display:flex; gap:8px; align-items:center;">
+      <button class="btn-scan btn-sm" id="btn-fabric-run" onclick="runFabricPattern()">▶ Run Pattern</button>
+      <span id="fabric-running" style="font-size:11px; color:var(--muted); display:none;">⏳ Running Fabric…</span>
+    </div>
+    <div id="fabric-output-wrap" style="display:none; flex-direction:column; gap:6px;">
+      <div style="display:flex; align-items:center; justify-content:space-between;">
+        <div style="font-size:11px; color:var(--muted);">Output:</div>
+        <button class="btn-ghost btn-xs" onclick="copyFabricOutput()">⎘ Copy</button>
+      </div>
+      <div id="fabric-output" style="font-family:var(--mono); font-size:11px; line-height:1.6;
+           background:var(--surface2); border:1px solid var(--border); border-radius:var(--radius);
+           padding:10px 12px; max-height:240px; overflow-y:auto; white-space:pre-wrap; color:var(--fg);"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Toasts -->
+<div id="toast-wrap"></div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════════════════════════
+let _pollTimer    = null;
+let _selectedId   = null;
+let _consoleAfter = 0;
+let _agentMap     = {};
+let _phaseFilter  = 'all';
+let _activeTab    = 'console';
+let _activeSection = 'overview';
+let _settings     = { openai: '', anthropic: '', auth_header: '', max_concurrent: 5 };
+
+const PHASES = ['Discovery', 'Active Scanning', 'Auth & Session', 'Protocol & Transport'];
+
+// ═══════════════════════════════════════════════════════════════
+// CORE UTILS
+// ═══════════════════════════════════════════════════════════════
+async function api(path, method = 'GET', body = null) {
+  try {
+    const opts = { method, headers: { 'Content-Type': 'application/json' } };
+    if (body) opts.body = JSON.stringify(body);
+    const r = await fetch(path, opts);
+    return await r.json();
+  } catch (e) { return { error: String(e) }; }
+}
+
+function toast(msg, type = '') {
+  const w = document.getElementById('toast-wrap');
+  const d = document.createElement('div');
+  d.className = 'toast-item' + (type ? ' ' + type : '');
+  d.textContent = msg;
+  w.appendChild(d);
+  setTimeout(() => d.remove(), 3500);
+}
+
+function escHtml(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function escAttr(s) { return String(s||'').replace(/['"&<>]/g, '_'); }
+
+// ═══════════════════════════════════════════════════════════════
+// SECTION NAV
+// ═══════════════════════════════════════════════════════════════
+function switchSection(section) {
+  _activeSection = section;
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  document.querySelectorAll('.nav-item[data-section]').forEach(n => n.classList.remove('active'));
+  const sec = document.getElementById('section-' + section);
+  if (sec) sec.classList.add('active');
+  const nav = document.querySelector(`.nav-item[data-section="${section}"]`);
+  if (nav) nav.classList.add('active');
+
+  if (section === 'tools')    loadToolsTab();
+  if (section === 'overview') refreshOverview();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SETTINGS
+// ═══════════════════════════════════════════════════════════════
+function openSettings() {
+  document.getElementById('inp-openai').value     = _settings.openai || '';
+  document.getElementById('inp-anthropic').value  = _settings.anthropic || '';
+  document.getElementById('inp-auth').value       = _settings.auth_header || '';
+  document.getElementById('inp-concurrent').value = _settings.max_concurrent || 5;
+  document.getElementById('modal-overlay').classList.add('open');
+}
+function closeSettings() { document.getElementById('modal-overlay').classList.remove('open'); }
+document.getElementById('modal-overlay').addEventListener('click', e => {
+  if (e.target === document.getElementById('modal-overlay')) closeSettings();
+});
+async function saveSettings() {
+  const openai    = document.getElementById('inp-openai').value.trim();
+  const anthropic = document.getElementById('inp-anthropic').value.trim();
+  const auth      = document.getElementById('inp-auth').value.trim();
+  const mc        = parseInt(document.getElementById('inp-concurrent').value) || 5;
+  const r = await api('/api/keys', 'POST', { openai, anthropic, auth_header: auth });
+  if (r.success) {
+    _settings = { openai, anthropic, auth_header: auth, max_concurrent: mc };
+    toast('Settings saved ✓', 'ok');
+    closeSettings();
+  } else { toast(r.error || 'Failed', 'err'); }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PHASE FILTER
+// ═══════════════════════════════════════════════════════════════
+function setPhaseFilter(phase) {
+  _phaseFilter = phase;
+  document.querySelectorAll('.phase-tab').forEach(t =>
+    t.classList.toggle('active', t.dataset.phase === phase)
+  );
+  renderAgentGrid(_agentMap);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SCAN LAUNCH / STOP
+// ═══════════════════════════════════════════════════════════════
+async function scanLaunch() {
+  const target = document.getElementById('target-input').value.trim();
+  if (!target) { toast('Enter a target URL first', 'err'); return; }
+
+  document.getElementById('btn-launch').disabled = true;
+  document.getElementById('btn-stop').style.display = 'inline-block';
+  document.getElementById('btn-launch').style.display = 'none';
+  document.getElementById('status-label').textContent = 'Launching…';
+  document.getElementById('pre-scan-msg').style.display = 'none';
+  document.getElementById('badge-mode').style.display = 'none';
+
+  _agentMap = {}; _selectedId = null; _consoleAfter = 0;
+  document.getElementById('agent-grid').innerHTML = '';
+  document.getElementById('findings-list').innerHTML = '';
+  document.getElementById('findings-empty').style.display = '';
+  document.getElementById('console-output').innerHTML = '<div id="console-empty" style="color:var(--muted);font-size:12px;padding:32px;text-align:center;">Click an agent card to view its output</div>';
+  document.getElementById('console-agent-name').textContent = 'Select an agent';
+
+  // Switch to agents section to watch
+  switchSection('agents');
+
+  const r = await api('/api/scan/launch', 'POST', {
+    target, max_concurrent: _settings.max_concurrent || 5,
+  });
+  if (!r || !r.success) {
+    toast(r?.error || 'Launch failed', 'err');
+    document.getElementById('btn-launch').disabled = false;
+    document.getElementById('btn-stop').style.display = 'none';
+    document.getElementById('btn-launch').style.display = 'inline-block';
+    document.getElementById('status-label').textContent = 'Error';
+    return;
+  }
+
+  if (!r.ai_mode) {
+    document.getElementById('badge-mode').style.display = '';
+    toast(`Static mode — ${r.count} agents launched`, '');
+  } else {
+    toast(`${r.count} agents launched for ${target}`, 'ok');
+  }
+  startPoll();
+}
+
+async function scanStop() {
+  await api('/api/scan/stop', 'POST');
+  toast('Scan stopped', '');
+  stopPoll();
+  document.getElementById('btn-stop').style.display = 'none';
+  document.getElementById('btn-launch').style.display = 'inline-block';
+  document.getElementById('btn-launch').disabled = false;
+  document.getElementById('status-label').textContent = 'Stopped';
+}
+
+// ═══════════════════════════════════════════════════════════════
+// POLL
+// ═══════════════════════════════════════════════════════════════
+function startPoll() {
+  if (_pollTimer) return;
+  _pollTimer = setInterval(doPoll, 2000);
+  doPoll();
+}
+function stopPoll() {
+  if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+}
+
+async function doPoll() {
+  const data = await api('/api/scan/status');
+  if (!data || data.error) return;
+  (data.agents || []).forEach(a => { _agentMap[a.id] = a; });
+  renderAgentGrid(_agentMap);
+  updateProgress(data);
+  updateStats(data);
+  if (_selectedId) streamConsole();
+  if (_activeTab === 'findings') loadFindings();
+
+  if (!data.scan_active && data.total > 0 && data.running === 0 && data.pending === 0) {
+    stopPoll();
+    document.getElementById('btn-stop').style.display = 'none';
+    document.getElementById('btn-launch').style.display = 'inline-block';
+    document.getElementById('btn-launch').disabled = false;
+    document.getElementById('status-label').textContent = `Done — ${data.findings} findings`;
+    toast(`Scan complete — ${data.findings} finding(s)`, 'ok');
+    loadFindings();
+    refreshOverview();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// RENDER AGENT GRID
+// ═══════════════════════════════════════════════════════════════
+function renderAgentGrid(agentMap) {
+  const grid = document.getElementById('agent-grid');
+  const agents = Object.values(agentMap);
+  if (!agents.length) return;
+
+  let html = '';
+  PHASES.forEach(phase => {
+    const phAgents = agents.filter(a => a.phase === phase);
+    if (!phAgents.length) return;
+    if (_phaseFilter !== 'all' && _phaseFilter !== phase) return;
+
+    html += `<div class="phase-group">
+      <div class="phase-label" data-phase="${phase}">
+        <span>${phase}</span>
+        <span class="ph-hr"></span>
+      </div>
+      <div class="agent-cards">`;
+
+    phAgents.forEach(a => {
+      const pct = a.max_iter > 0 ? Math.round((a.iteration / (a.max_iter||10)) * 100) : 0;
+      const sel = a.id === _selectedId ? ' selected' : '';
+      const fBadge = a.findings_count > 0
+        ? `<span class="card-findings-badge">${a.findings_count} finding${a.findings_count>1?'s':''}</span>` : '';
+
+      html += `<div class="agent-card${sel}" data-phase="${phase}" data-id="${a.id}" onclick="selectAgent('${a.id}')">
+        <div class="card-top">
+          <div class="card-name">
+            <span class="card-icon">${a.icon}</span>
+            ${a.name}
+          </div>
+          <div class="card-status-dot ${a.status}" title="${a.status}"></div>
+        </div>
+        <div class="card-meta">
+          <span class="card-stat">Status: <span>${a.status}</span></span>
+          <span class="card-stat">Cmds: <span>${a.commands_run}</span></span>
+          ${fBadge}
+        </div>
+        <div class="card-progress">
+          <div class="card-progress-bar" style="width:${pct}%"></div>
+        </div>
+      </div>`;
+    });
+
+    html += '</div></div>';
+  });
+
+  grid.innerHTML = html;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PROGRESS & STATS
+// ═══════════════════════════════════════════════════════════════
+function updateProgress(data) {
+  const total = data.total || 0;
+  const done  = data.done  || 0;
+  const pct   = total > 0 ? Math.round((done / total) * 100) : 0;
+  document.getElementById('scan-progress-bar').style.width = pct + '%';
+
+  const lbl = data.scan_active
+    ? `${data.running} running · ${data.pending} pending · ${done}/${total}`
+    : (total > 0 ? `${done}/${total} done` : 'Ready');
+  document.getElementById('status-label').textContent = lbl;
+
+  const br = document.getElementById('badge-running');
+  const bf = document.getElementById('badge-findings');
+  const brt = document.getElementById('badge-run-txt');
+  const bft = document.getElementById('badge-find-txt');
+  if (data.running > 0) { br.style.display = ''; if(brt) brt.textContent = data.running; }
+  else br.style.display = 'none';
+  if (data.findings > 0) { bf.style.display = ''; if(bft) bft.textContent = data.findings; }
+  else bf.style.display = 'none';
+
+  const fc = document.getElementById('findings-count-tab');
+  if (fc) fc.textContent = data.findings > 0 ? ` (${data.findings})` : '';
+}
+
+function updateStats(data) {
+  const $ = id => document.getElementById(id);
+  $('st-target') && ($('st-target').textContent   = data.target  || '—');
+  $('st-total')  && ($('st-total').textContent    = data.total   || 0);
+  $('st-running')&& ($('st-running').textContent  = data.running || 0);
+  $('st-done')   && ($('st-done').textContent     = data.done    || 0);
+  $('st-pending')&& ($('st-pending').textContent  = data.pending || 0);
+  $('st-findings')&&($('st-findings').textContent = data.findings|| 0);
+}
+
+function updateSeverityStats(findings) {
+  const c = { critical:0, high:0, medium:0, low:0, info:0 };
+  findings.forEach(f => {
+    const s = (f.severity||'medium').toLowerCase();
+    if (c[s]!==undefined) c[s]++; else c.medium++;
+  });
+  const $ = id => document.getElementById(id);
+  $('st-critical') && ($('st-critical').textContent = c.critical);
+  $('st-high')     && ($('st-high').textContent     = c.high);
+  $('st-medium')   && ($('st-medium').textContent   = c.medium);
+  $('st-low')      && ($('st-low').textContent      = c.low);
+  $('st-info')     && ($('st-info').textContent     = c.info);
+  updateOverviewSeverity(c, findings.length);
+}
+
+function updateOverviewSeverity(c, total) {
+  const $ = id => document.getElementById(id);
+  $('ov-critical') && ($('ov-critical').textContent = c.critical);
+  $('ov-high')     && ($('ov-high').textContent     = c.high);
+  $('ov-medium')   && ($('ov-medium').textContent   = c.medium);
+
+  // Severity bar
+  const t = total || 1;
+  const pct = v => Math.round((v/t)*100) + '%';
+  ['critical','high','medium','low','info'].forEach(sev => {
+    const el = $('sb-' + sev);
+    const sl = $('sl-' + sev);
+    if (el) el.style.width = pct(c[sev] || 0);
+    if (sl) sl.textContent = c[sev] || 0;
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// OVERVIEW REFRESH
+// ═══════════════════════════════════════════════════════════════
+async function refreshOverview() {
+  const [caps, findings] = await Promise.all([
+    api('/api/capabilities'),
+    api('/api/findings'),
+  ]);
+
+  if (caps && !caps.error) {
+    const el = document.getElementById('ov-agents');
+    if (el) el.textContent = caps.agents?.enabled || 0;
+    const sub = document.getElementById('ov-agents-sub');
+    if (sub) sub.textContent = `of ${caps.agents?.total || 0} agents`;
+
+    // Engine status cards
+    const summary = document.getElementById('ov-engine-summary');
+    if (summary) {
+      const spider = caps.engine?.progress || {};
+      const tick = v => v ? '✓ Available' : '✗ Unavailable';
+      summary.innerHTML = `
+        <div class="engine-card">
+          <span class="engine-card-icon">🕸</span>
+          <div class="engine-card-body">
+            <div class="engine-card-name">Spider</div>
+            <div class="engine-card-val" style="color:var(--green)">${caps.engine?.available ? 'Available' : '—'}</div>
+          </div>
+        </div>
+        <div class="engine-card">
+          <span class="engine-card-icon">🛡</span>
+          <div class="engine-card-body">
+            <div class="engine-card-name">Passive Scan</div>
+            <div class="engine-card-val" style="color:${caps.passive_scanner?.available?'var(--green)':'var(--muted)'}">
+              ${caps.passive_scanner?.available ? `${caps.passive_scanner.findings||0} findings` : 'N/A'}
+            </div>
+          </div>
+        </div>
+        <div class="engine-card">
+          <span class="engine-card-icon">📂</span>
+          <div class="engine-card-body">
+            <div class="engine-card-name">Forced Browse</div>
+            <div class="engine-card-val" style="color:${caps.forced_browse?.available?'var(--green)':'var(--muted)'}">
+              ${caps.forced_browse?.available ? `${caps.forced_browse.results||0} paths` : 'N/A'}
+            </div>
+          </div>
+        </div>
+        <div class="engine-card">
+          <span class="engine-card-icon">📋</span>
+          <div class="engine-card-body">
+            <div class="engine-card-name">OpenAPI</div>
+            <div class="engine-card-val" style="color:${caps.openapi_import?.surfaces_loaded?'var(--accent)':'var(--muted)'}">
+              ${caps.openapi_import?.surfaces_loaded ? `${caps.openapi_import.surfaces_loaded} surfaces` : 'Not imported'}
+            </div>
+          </div>
+        </div>`;
+    }
+  }
+
+  if (findings && !findings.error) {
+    const f = findings.findings || [];
+    renderFindings(f);
+    updateSeverityStats(f);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// AGENT CONSOLE
+// ═══════════════════════════════════════════════════════════════
+function selectAgent(id) {
+  document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('selected'));
+  const card = document.querySelector(`.agent-card[data-id="${id}"]`);
+  if (card) card.classList.add('selected');
+
+  _selectedId   = id;
+  _consoleAfter = 0;
+  document.getElementById('console-output').innerHTML = '';
+
+  const a = _agentMap[id];
+  if (a) {
+    document.getElementById('console-agent-name').textContent = `${a.icon} ${a.name}`;
+    document.getElementById('console-status').textContent     = `[${a.status}]`;
+  }
+
+  switchTab('console');
+  streamConsole();
+}
+
+async function streamConsole() {
+  if (!_selectedId) return;
+  const r = await api(`/api/agent/${_selectedId}/output?after=${_consoleAfter}`);
+  if (!r || r.error) return;
+
+  const out = document.getElementById('console-output');
+  const emp = document.getElementById('console-empty');
+  if (emp) emp.remove();
+
+  (r.lines || []).forEach(line => {
+    const d = document.createElement('div');
+    d.className = 'cout-line ' + classifyLine(line);
+    d.textContent = line;
+    out.appendChild(d);
+  });
+  out.scrollTop = out.scrollHeight;
+  _consoleAfter = r.after;
+
+  const statusEl = document.getElementById('console-status');
+  if (statusEl && r.status) statusEl.textContent = `[${r.status}]`;
+}
+
+function classifyLine(line) {
+  if (line.startsWith('[DONE]'))   return 'cout-done';
+  if (line.startsWith('[STATIC]') || line.startsWith('[MODE]')) return 'cout-static';
+  if (line.startsWith('[ERROR]') || line.startsWith('[AGENT ERROR]') || line.startsWith('[LLM ERROR]')) return 'cout-err';
+  if (line.startsWith('[ADAPT]'))  return 'cout-adapt';
+  if (line.startsWith('[SHARED]')) return 'cout-shared';
+  if (line.includes('$ '))         return 'cout-cmd';
+  if (line.startsWith('  →'))      return 'cout-hint';
+  return '';
+}
+
+// ═══════════════════════════════════════════════════════════════
+// FINDINGS
+// ═══════════════════════════════════════════════════════════════
+async function loadFindings() {
+  const r = await api('/api/findings');
+  if (!r || r.error) return;
+  const findings = r.findings || [];
+  renderFindings(findings);
+  updateSeverityStats(findings);
+}
+
+function renderFindings(findings) {
+  const list  = document.getElementById('findings-list');
+  const empty = document.getElementById('findings-empty');
+  if (!list) return;
+  if (!findings.length) {
+    list.innerHTML = '';
+    if (empty) empty.style.display = '';
+    return;
+  }
+  if (empty) empty.style.display = 'none';
+
+  let html = '';
+  findings.forEach((f, idx) => {
+    const sev      = (f.severity || 'medium').toLowerCase();
+    const sevBadge = `<span class="sev-badge sev-${sev}">${sev.toUpperCase()}</span>`;
+    html += `<div class="finding-item">
+      <div class="fi-header">
+        <span class="fi-icon">${f.icon||'🔍'}</span>
+        <div style="flex:1;">
+          <div class="fi-text">${sevBadge}${escHtml(f.finding)}</div>
+          <div class="fi-meta">
+            <span class="fi-phase-tag" data-phase="${f.phase}">${f.phase}</span>
+            ${escHtml(f.agent)} · ${escHtml(f.target)}
+          </div>
+          <div class="fi-actions">
+            <button class="btn-ghost btn-xs btn-fabric" onclick="openFabricFinding(${idx})" title="Analyse with Fabric">🧵 Fabric</button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  });
+  list.innerHTML = html;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PANEL TABS (inside Agents section)
+// ═══════════════════════════════════════════════════════════════
+function switchTab(tab) {
+  _activeTab = tab;
+  ['console','findings','stats','tools'].forEach(t => {
+    const el = document.getElementById('tab-' + t);
+    if (el) el.style.display = t === tab ? '' : 'none';
+    const pt = document.querySelector(`.panel-tab[data-tab="${t}"]`);
+    if (pt) pt.classList.toggle('active', t === tab);
+  });
+  if (tab === 'findings') loadFindings();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// EXPORT / REPORT
+// ═══════════════════════════════════════════════════════════════
+function exportFindings() { window.open('/api/findings/export', '_blank'); }
+function openReport()     { window.open('/api/report', '_blank'); }
+function downloadSarif()  { window.open('/api/report/sarif', '_blank'); }
+function downloadXml()    { window.open('/api/report/xml', '_blank'); }
+function exportSitemap()  { window.open('/api/sitemap/export', '_blank'); }
+
+// ═══════════════════════════════════════════════════════════════
+// PROXY
+// ═══════════════════════════════════════════════════════════════
+let _proxyRunning = false;
+
+async function toggleProxy() {
+  const btn  = document.getElementById('btn-proxy');
+  const port = parseInt(document.getElementById('proxy-port-inp').value) || 8090;
+  if (!_proxyRunning) {
+    btn.disabled = true;
+    const r = await api('/api/proxy/start', 'POST', { port });
+    btn.disabled = false;
+    if (r.started) {
+      _proxyRunning = true;
+      toast(`Proxy started on port ${port}`, 'ok');
+    } else {
+      toast(r.error || 'Failed to start proxy', 'err');
+    }
+  } else {
+    toast('Proxy runs until app restarts', '');
+  }
+  await refreshProxyStatus();
+}
+
+async function refreshProxyStatus() {
+  const r = await api('/api/proxy/status');
+  if (!r || r.error) return;
+  _proxyRunning = r.running;
+  const dot   = document.getElementById('proxy-dot');
+  const label = document.getElementById('proxy-label');
+  const btn   = document.getElementById('btn-proxy');
+  const smap  = document.getElementById('sitemap-count');
+  if (dot)   { dot.className = 'tool-dot ' + (r.running ? 'on' : 'off'); }
+  if (label) label.textContent = r.running ? `Running on :${r.port}` : 'Not running';
+  if (btn)   btn.textContent   = r.running ? '● Running' : 'Start Proxy';
+  if (smap)  smap.textContent  = (r.urls_captured || 0);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// OAST
+// ═══════════════════════════════════════════════════════════════
+async function startOAST() {
+  const r = await api('/api/oast/start', 'POST');
+  if (r.error) { toast(r.error, 'err'); return; }
+  const st = document.getElementById('oast-status');
+  const ud = document.getElementById('oast-url-display');
+  if (st) st.textContent = `Listening on port ${r.port}`;
+  if (ud) ud.textContent = `http://YOUR-IP:${r.port}/TOKEN`;
+  toast(`OAST listener started on port ${r.port}`, 'ok');
+}
+
+async function loadOASTStatus() {
+  const r = await api('/api/oast/status');
+  if (!r || r.error) return;
+  const st    = document.getElementById('oast-status');
+  const cnt   = document.getElementById('oast-count');
+  if (st) st.textContent = r.running ? `Listening on port ${r.port}` : 'Not started';
+  if (cnt) cnt.textContent = r.callbacks || 0;
+}
+
+async function viewOASTCallbacks() {
+  const r = await api('/api/oast/callbacks');
+  if (!r || r.error) return;
+  const cbs = r.callbacks || [];
+  if (!cbs.length) { toast('No OAST callbacks yet', ''); return; }
+  const lines = cbs.map(c =>
+    `[${c.timestamp}] ${c.source_ip} → ${c.method} ${c.path} (${c.vuln_type||'?'}) @ ${c.target_url}`
+  );
+  const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'oast_callbacks.txt';
+  a.click();
+}
+
+async function clearOAST() {
+  await api('/api/oast/clear', 'POST');
+  toast('OAST callbacks cleared', '');
+  const cnt = document.getElementById('oast-count');
+  if (cnt) cnt.textContent = '0';
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PASSIVE SCANNER
+// ═══════════════════════════════════════════════════════════════
+async function runPassiveScan() {
+  const target = document.getElementById('target-input').value.trim();
+  if (!target) { toast('Enter a target URL first', 'err'); return; }
+  const st = document.getElementById('passive-status');
+  if (st) st.textContent = '⏳ Scanning…';
+  const r = await api('/api/passive/scan', 'POST', { target });
+  if (r.error) {
+    if (st) st.textContent = '✗ ' + r.error;
+    toast(r.error, 'err');
+    return;
+  }
+  if (st) st.textContent = `✓ Done — ${r.findings_count || 0} findings`;
+  const cnt = document.getElementById('passive-count');
+  if (cnt) cnt.textContent = `${r.findings_count || 0} findings`;
+  toast(`Passive scan — ${r.findings_count || 0} findings`, 'ok');
+  await loadPassiveFindings();
+}
+
+async function loadPassiveFindings() {
+  const r = await api('/api/passive/findings');
+  if (!r || r.error) return;
+  const list = document.getElementById('passive-results-list');
+  const cnt  = document.getElementById('passive-count');
+  const findings = r.findings || [];
+  if (cnt) cnt.textContent = `${findings.length} findings`;
+  if (!list) return;
+  if (!findings.length) { list.innerHTML = ''; return; }
+  list.innerHTML = findings.slice(0, 20).map(f => {
+    const sev = (f.severity||'Info').toLowerCase();
+    return `<div class="result-item">
+      <span class="sev-badge sev-${sev}" style="flex-shrink:0">${(f.severity||'Info').substring(0,4)}</span>
+      <span style="flex:1; color:var(--fg2); font-size:11px;">${escHtml(f.finding||f.category||'?')}</span>
+    </div>`;
+  }).join('');
+}
+
+// ═══════════════════════════════════════════════════════════════
+// FORCED BROWSE
+// ═══════════════════════════════════════════════════════════════
+let _fbPollTimer = null;
+
+async function startForceBrowse() {
+  const target = document.getElementById('target-input').value.trim();
+  if (!target) { toast('Enter a target URL first', 'err'); return; }
+  const r = await api('/api/engine/forcebrowse', 'POST', { target });
+  if (r.error) { toast(r.error, 'err'); return; }
+  toast('Forced browse started', 'ok');
+  document.getElementById('btn-forcebrowse').style.display = 'none';
+  document.getElementById('btn-forcebrowse-stop').style.display = 'inline-block';
+  _fbPollTimer = setInterval(pollForceBrowse, 1500);
+}
+
+async function stopForceBrowse() {
+  await api('/api/engine/forcebrowse/stop', 'POST');
+  clearInterval(_fbPollTimer); _fbPollTimer = null;
+  document.getElementById('btn-forcebrowse').style.display = 'inline-block';
+  document.getElementById('btn-forcebrowse-stop').style.display = 'none';
+  toast('Forced browse stopped', '');
+}
+
+async function pollForceBrowse() {
+  const r = await api('/api/engine/forcebrowse/results');
+  if (!r || r.error) return;
+  const results = r.results || [];
+  const cnt  = document.getElementById('fb-count');
+  const st   = document.getElementById('fb-status');
+  if (cnt) cnt.textContent = `${results.length} paths`;
+  if (st)  st.textContent  = r.running ? '⏳ Running…' : '✓ Done';
+  if (!r.running) {
+    clearInterval(_fbPollTimer); _fbPollTimer = null;
+    document.getElementById('btn-forcebrowse').style.display = 'inline-block';
+    document.getElementById('btn-forcebrowse-stop').style.display = 'none';
+    toast(`Forced browse done — ${results.length} paths`, 'ok');
+  }
+  const list = document.getElementById('fb-results-list');
+  if (list && results.length) {
+    list.innerHTML = results.slice(0, 15).map(res => {
+      const code = res.status_code || 0;
+      let cls = 'code-other';
+      if (code === 200) cls = 'code-200';
+      else if ([301,302,307,308].includes(code)) cls = 'code-301';
+      else if ([401,403].includes(code)) cls = 'code-401';
+      else if ([500,503].includes(code)) cls = 'code-500';
+      return `<div class="result-item">
+        <span class="result-code ${cls}">${code}</span>
+        <span style="flex:1; color:var(--fg2); font-size:10px; font-family:var(--mono); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escHtml(res.url)}">${escHtml(res.url)}</span>
+      </div>`;
+    }).join('');
+  }
+}
+
+async function viewBrowseResults() {
+  const r = await api('/api/engine/forcebrowse/results');
+  if (!r || r.error) return;
+  const results = r.results || [];
+  if (!results.length) { toast('No results yet', ''); return; }
+  const lines = results.map(res => `[${res.status_code}] ${res.url}${res.note ? '  — '+res.note : ''}`);
+  const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'forced_browse_results.txt';
+  a.click();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// OPENAPI IMPORT
+// ═══════════════════════════════════════════════════════════════
+async function importOpenApi() {
+  const url = document.getElementById('openapi-url').value.trim();
+  if (!url) { toast('Enter a spec URL', 'err'); return; }
+  const btn = document.getElementById('btn-openapi-import');
+  const st  = document.getElementById('openapi-status');
+  btn.disabled = true;
+  if (st) st.textContent = '⏳ Fetching spec…';
+  const r = await api('/api/openapi/import', 'POST', { url });
+  btn.disabled = false;
+  if (r.error) {
+    if (st) st.textContent = '✗ ' + r.error;
+    toast(r.error, 'err'); return;
+  }
+  if (st) st.textContent = `✓ ${r.spec_type} — ${r.endpoints_found} endpoints added to site map`;
+  const ep = document.getElementById('openapi-epcount');
+  const ti = document.getElementById('openapi-title');
+  if (ep) ep.textContent = r.endpoints_found + ' endpoints';
+  if (ti) ti.textContent = `${r.title} v${r.version}`;
+  toast(`OpenAPI import — ${r.endpoints_found} endpoints`, 'ok');
+}
+
+async function loadOpenApiStatus() {
+  const r = await api('/api/openapi/status');
+  if (!r || !r.imported) return;
+  const st = document.getElementById('openapi-status');
+  const ep = document.getElementById('openapi-epcount');
+  const ti = document.getElementById('openapi-title');
+  if (st) st.textContent = `✓ ${r.spec_type} — imported ${r.imported_at ? new Date(r.imported_at).toLocaleTimeString() : ''}`;
+  if (ep) ep.textContent = (r.endpoint_count || 0) + ' endpoints';
+  if (ti) ti.textContent = `${r.title||''} v${r.version||''}`;
+}
+
+async function viewOpenApiEndpoints() {
+  const r = await api('/api/openapi/endpoints');
+  if (!r || r.error) return;
+  const lines = (r.endpoints || []).map(e =>
+    `[${e.method.padEnd(6)}] ${e.url}${e.summary ? '  — '+e.summary : ''}`
+  );
+  const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'openapi_endpoints.txt';
+  a.click();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SPIDER
+// ═══════════════════════════════════════════════════════════════
+let _spiderPollTimer = null;
+
+async function startSpider() {
+  const target = document.getElementById('target-input').value.trim();
+  if (!target) { toast('Enter a target URL first', 'err'); return; }
+  const depth   = parseInt(document.getElementById('spider-depth').value)   || 5;
+  const maxurls = parseInt(document.getElementById('spider-maxurls').value) || 0;
+  const scope   = document.getElementById('spider-scope').value;
+  const r = await api('/api/spider/start', 'POST', { target, max_depth: depth, max_urls: maxurls, scope });
+  if (r.error) { toast(r.error, 'err'); return; }
+  toast(`Spider started — depth ${depth}`, 'ok');
+  document.getElementById('btn-spider-start').style.display = 'none';
+  document.getElementById('btn-spider-stop').style.display  = 'inline-block';
+  _spiderPollTimer = setInterval(pollSpider, 1500);
+}
+
+async function stopSpider() {
+  await api('/api/spider/stop', 'POST');
+  toast('Spider stopped', '');
+  clearInterval(_spiderPollTimer); _spiderPollTimer = null;
+  document.getElementById('btn-spider-start').style.display = 'inline-block';
+  document.getElementById('btn-spider-stop').style.display  = 'none';
+}
+
+async function pollSpider() {
+  const r = await api('/api/spider/status');
+  if (!r || r.error) return;
+  const st  = document.getElementById('spider-status');
+  const cnt = document.getElementById('spider-count');
+  if (st)  st.textContent  = `[${r.status}] visited ${r.urls_visited}`;
+  if (cnt) cnt.textContent = (r.urls_found || 0) + ' URLs';
+  if (!r.running && r.status !== 'idle') {
+    clearInterval(_spiderPollTimer); _spiderPollTimer = null;
+    document.getElementById('btn-spider-start').style.display = 'inline-block';
+    document.getElementById('btn-spider-stop').style.display  = 'none';
+    if (st) st.textContent = `✓ ${r.status} — ${r.urls_found} URLs`;
+    toast(`Spider done — ${r.urls_found} URLs`, 'ok');
+  }
+}
+
+async function viewSpiderResults() {
+  const r = await api('/api/spider/results');
+  if (!r || r.error) return;
+  const urls = r.urls || [];
+  if (!urls.length) { toast('No URLs yet', ''); return; }
+  const blob = new Blob([urls.join('\n')], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'spider_results.txt';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// AJAX CRAWL
+// ═══════════════════════════════════════════════════════════════
+async function runAjaxCrawl() {
+  const target = document.getElementById('target-input').value.trim();
+  if (!target) { toast('Enter a target URL first', 'err'); return; }
+  const btn = document.getElementById('btn-ajax');
+  const st  = document.getElementById('ajax-status');
+  btn.disabled = true;
+  if (st) st.textContent = '⏳ Crawling with headless Chromium…';
+  const r = await api('/api/ajax-crawl', 'POST', { target });
+  btn.disabled = false;
+  if (r.error) {
+    if (st) st.textContent = '✗ ' + r.error;
+    toast(r.error, 'err');
+  } else {
+    if (st) st.textContent = `✓ Found ${r.urls_found || 0} URLs`;
+    toast(`AJAX crawl — ${r.urls_found || 0} URLs`, 'ok');
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// LOGIN CONFIG
+// ═══════════════════════════════════════════════════════════════
+async function saveLoginConfig() {
+  const cfg = {
+    login_url:      document.getElementById('login-url').value.trim(),
+    username_field: document.getElementById('login-user-field').value.trim() || 'username',
+    password_field: document.getElementById('login-pass-field').value.trim() || 'password',
+    username:       document.getElementById('login-user').value.trim(),
+    password:       document.getElementById('login-pass').value,
+  };
+  const r = await api('/api/login/config', 'POST', cfg);
+  const st = document.getElementById('login-status');
+  if (r.saved) {
+    toast('Login config saved ✓', 'ok');
+    if (st) st.textContent = '✓ Saved';
+  } else {
+    toast(r.error || 'Failed', 'err');
+  }
+}
+
+async function executeLogin() {
+  const target = document.getElementById('target-input').value.trim();
+  const btn = document.getElementById('btn-login-exec');
+  const st  = document.getElementById('login-status');
+  btn.disabled = true;
+  if (st) st.textContent = '⏳ Logging in…';
+  const r = await api('/api/login/execute', 'POST', { target });
+  btn.disabled = false;
+  if (r.success) {
+    if (st) st.textContent = '✓ Login succeeded — session captured';
+    toast('Login executed successfully', 'ok');
+  } else {
+    if (st) st.textContent = '✗ ' + (r.error || 'Login failed');
+    toast(r.error || 'Login failed', 'err');
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// AGENT TUNING
+// ═══════════════════════════════════════════════════════════════
+let _agentConfigs = {};
+
+async function loadAgentTuning() {
+  const r = await api('/api/config/agents');
+  if (!r || r.error) return;
+  _agentConfigs = r;
+  const container = document.getElementById('agent-tuning-list');
+  if (!container) return;
+
+  let html = '';
+  Object.entries(r).forEach(([name, cfg]) => {
+    const enChk = cfg.enabled ? 'checked' : '';
+    html += `<div class="tune-row">
+      <input type="checkbox" id="tune-en-${escAttr(name)}" ${enChk}
+             onchange="setAgentEnabled('${escAttr(name)}', this.checked)"
+             style="accent-color:var(--accent); cursor:pointer;" />
+      <span style="flex:1; font-size:11px; color:var(--fg2);">${escHtml(name)}</span>
+      <select id="tune-int-${escAttr(name)}"
+              onchange="setAgentIntensity('${escAttr(name)}', this.value)"
+              style="background:var(--surface3); border:1px solid var(--border); border-radius:3px;
+                     color:var(--fg); font-size:10px; padding:2px 4px; cursor:pointer;">
+        <option value="low"    ${cfg.intensity==='low'    ? 'selected':''}>Low</option>
+        <option value="medium" ${cfg.intensity==='medium' ? 'selected':''}>Med</option>
+        <option value="high"   ${cfg.intensity==='high'   ? 'selected':''}>High</option>
+      </select>
+    </div>`;
+  });
+  container.innerHTML = html || '<div class="dimmed" style="font-size:11px;">No agents configured</div>';
+}
+
+async function setAgentEnabled(name, enabled) {
+  const cfg = _agentConfigs[name] || {};
+  await api('/api/config/agents', 'POST', { name, enabled, intensity: cfg.intensity || 'medium' });
+  _agentConfigs[name] = { ...cfg, enabled };
+}
+
+async function setAgentIntensity(name, intensity) {
+  const cfg = _agentConfigs[name] || {};
+  await api('/api/config/agents', 'POST', { name, enabled: cfg.enabled !== false, intensity });
+  _agentConfigs[name] = { ...cfg, intensity };
+}
+
+// ═══════════════════════════════════════════════════════════════
+// CAPABILITIES
+// ═══════════════════════════════════════════════════════════════
+async function loadCapabilitiesStatus() {
+  const r = await api('/api/capabilities');
+  if (!r || r.error) return;
+  const el = document.getElementById('capabilities-status');
+  if (!el) return;
+  const tick = v => v
+    ? '<span class="cap-tick-yes">✓</span>'
+    : '<span class="cap-tick-no">—</span>';
+  const rt = r.hooks?.runtimes || {};
+  el.innerHTML = `
+    <div class="cap-row"><span class="cap-name">Proxy (mitmproxy)</span>${tick(r.proxy?.available)}</div>
+    <div class="cap-row"><span class="cap-name">AJAX Spider (Playwright)</span>${tick(r.playwright?.available)}</div>
+    <div class="cap-row"><span class="cap-name">Passive Scanner</span>${tick(r.passive_scanner?.available)}</div>
+    <div class="cap-row"><span class="cap-name">Forced Browse</span>${tick(r.forced_browse?.available)}</div>
+    <div class="cap-row"><span class="cap-name">OAST Listener</span>${tick(r.oast?.available)}</div>
+    <div class="cap-row"><span class="cap-name">OpenAPI Importer</span>${tick(r.openapi_import?.available)}</div>
+    <div class="cap-row"><span class="cap-name">Fabric (AI patterns)</span>${tick(r.fabric?.available)}</div>
+    <div class="cap-row"><span class="cap-name">Hooks — Python</span>${tick(rt.python)}</div>
+    <div class="cap-row"><span class="cap-name">Hooks — JavaScript</span>${tick(rt.javascript)}</div>
+    <div class="cap-row"><span class="cap-name">Hooks — Groovy</span>${tick(rt.groovy)}</div>
+    <div class="cap-row"><span class="cap-name">Hooks loaded</span><span class="cap-count">${r.hooks?.loaded || 0}</span></div>
+    <div class="cap-row"><span class="cap-name">Agents enabled</span><span class="cap-count">${r.agents?.enabled||0}/${r.agents?.total||0}</span></div>
+    <div class="cap-row"><span class="cap-name">Site map URLs</span><span class="cap-count">${r.site_map?.urls||0}</span></div>`;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// TOOLS TAB LOADER
+// ═══════════════════════════════════════════════════════════════
+async function loadToolsTab() {
+  await Promise.all([
+    refreshProxyStatus(),
+    loadAgentTuning(),
+    loadCapabilitiesStatus(),
+    loadOpenApiStatus(),
+    loadOASTStatus(),
+  ]);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// FABRIC
+// ═══════════════════════════════════════════════════════════════
+let _fabricPatterns  = [];
+let _fabricCtx       = null;
+let _fabricSelected  = null;
+
+async function _ensureFabricPatterns() {
+  if (_fabricPatterns.length) return;
+  const r = await api('/api/fabric/patterns');
+  if (r.patterns) _fabricPatterns = r.patterns;
+  if (!r.available) toast('Fabric not found — install from github.com/danielmiessler/fabric', 'err');
+}
+
+function _renderPatternGrid(defaultId) {
+  const grid = document.getElementById('fabric-pattern-grid');
+  if (!grid) return;
+  grid.innerHTML = _fabricPatterns.map(p => `
+    <div onclick="selectFabricPattern('${p.id}')" id="fp-${p.id}"
+         style="cursor:pointer; background:var(--surface2); border:1px solid var(--border);
+                border-radius:var(--radius); padding:8px 10px; font-size:11px;
+                ${p.id===defaultId ? 'border-color:var(--accent);' : ''}">
+      <div style="font-weight:600; color:var(--fg);">${p.label}</div>
+      <div style="color:var(--muted); font-size:10px; margin-top:2px;">${p.desc}</div>
+    </div>`).join('');
+  _fabricSelected = defaultId;
+}
+
+function selectFabricPattern(id) {
+  _fabricSelected = id;
+  document.querySelectorAll('[id^="fp-"]').forEach(el => {
+    el.style.borderColor = '';
+  });
+  const el = document.getElementById('fp-' + id);
+  if (el) el.style.borderColor = 'var(--accent)';
+}
+
+async function openFabricFinding(idx) {
+  await _ensureFabricPatterns();
+  const r = await api('/api/findings');
+  const findings = r.findings || [];
+  if (!findings[idx]) return;
+  const f = findings[idx];
+  const preview = [`Vulnerability: ${f.finding}`, `Severity: ${(f.severity||'medium').toUpperCase()}`,
+    `Agent: ${f.agent}`, `Target: ${f.target}`].join('\n');
+  _fabricCtx = { type: 'finding', idx, inputText: preview };
+  document.getElementById('fabric-input-label').textContent = `Input — ${f.agent} finding:`;
+  document.getElementById('fabric-input-preview').textContent = preview;
+  document.getElementById('fabric-output-wrap').style.display = 'none';
+  document.getElementById('fabric-overlay').style.display = 'flex';
+  _renderPatternGrid('create_report_finding');
+}
+
+async function openFabricSummary() {
+  await _ensureFabricPatterns();
+  const r = await api('/api/findings');
+  const findings = r.findings || [];
+  if (!findings.length) { toast('No findings yet — run a scan first', 'err'); return; }
+  const preview = `${findings.length} findings from scan of ${document.getElementById('target-input').value || 'target'}`;
+  _fabricCtx = { type: 'summary', inputText: preview };
+  document.getElementById('fabric-input-label').textContent = `Input — all ${findings.length} findings:`;
+  document.getElementById('fabric-input-preview').textContent = preview;
+  document.getElementById('fabric-output-wrap').style.display = 'none';
+  document.getElementById('fabric-overlay').style.display = 'flex';
+  _renderPatternGrid('create_cyber_summary');
+}
+
+async function runFabricPattern() {
+  if (!_fabricSelected || !_fabricCtx) return;
+  const btn = document.getElementById('btn-fabric-run');
+  const running = document.getElementById('fabric-running');
+  btn.style.display = 'none'; running.style.display = '';
+  let r;
+  if (_fabricCtx.type === 'summary') {
+    r = await api('/api/fabric/summary', 'POST', { pattern: _fabricSelected });
+  } else {
+    r = await api(`/api/fabric/finding/${_fabricCtx.idx}`, 'POST', { pattern: _fabricSelected });
+  }
+  btn.style.display = ''; running.style.display = 'none';
+  if (r.error) { toast(r.error, 'err'); return; }
+  const wrap = document.getElementById('fabric-output-wrap');
+  const out  = document.getElementById('fabric-output');
+  wrap.style.display = 'flex';
+  out.textContent = r.output || '(no output)';
+}
+
+function copyFabricOutput() {
+  navigator.clipboard.writeText(document.getElementById('fabric-output').textContent)
+    .then(() => toast('Copied ✓', 'ok'));
+}
+
+function closeFabric() {
+  document.getElementById('fabric-overlay').style.display = 'none';
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeFabric(); });
+
+// ═══════════════════════════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════════════════════════
+(async () => {
+  const [keys, loginCfg] = await Promise.all([
+    api('/api/keys'),
+    api('/api/login/config'),
+  ]);
+
+  if (keys.keys && keys.keys.length) {
+    if (keys.keys.includes('openai'))      _settings.openai      = '••••';
+    if (keys.keys.includes('anthropic'))   _settings.anthropic   = '••••';
+    if (keys.keys.includes('auth_header')) _settings.auth_header = '••••';
+  }
+
+  if (loginCfg && !loginCfg.error) {
+    const f = (id, val) => { const el = document.getElementById(id); if (el && val) el.value = val; };
+    f('login-url',        loginCfg.login_url);
+    f('login-user-field', loginCfg.username_field);
+    f('login-pass-field', loginCfg.password_field);
+    f('login-user',       loginCfg.username);
+  }
+
+  // Load initial overview data
+  await refreshOverview();
+})();
+</script>
+</body>
+</html>
