@@ -2,15 +2,18 @@
 Forced Browse — wordlist-based hidden path/file discovery.
 DirBuster / Feroxbuster style. Zero external dependencies.
 
-Built-in wordlist: ~2,000 common dirs/files/endpoints.
-Optional: pass extra_wordlist for custom paths.
+Wordlists loaded from wordlists/ directory (30,000+ paths).
+Supports: common.txt (full), or category-specific lists.
+Fallback: minimal built-in list if files not found.
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
+from pathlib import Path
 from typing import Optional
 from urllib.parse import urljoin
 
@@ -18,142 +21,124 @@ import requests
 import requests.exceptions
 
 
-# ── Wordlist ──────────────────────────────────────────────────────────────────
+# ── Wordlist Loading ─────────────────────────────────────────────────────────
 
-_WORDLIST: list[str] = [
-    # ── Admin / Management ────────────────────────────────────────────────────
-    "admin", "administrator", "admin.php", "admin.html", "admin/login",
-    "admin/dashboard", "admin/panel", "admin/config", "admin/settings",
-    "admin/users", "admin/db", "admin/backup", "admin/logs",
-    "admin/console", "admin/shell", "admin/terminal",
-    "wp-admin", "wp-admin/", "wp-login.php", "wp-cron.php",
-    "phpmyadmin", "phpMyAdmin", "phpinfo.php", "pma",
-    "manager", "management", "panel", "controlpanel", "cpanel",
-    "webadmin", "adminer", "adminer.php",
+_MODULE_DIR = Path(__file__).resolve().parent
+_WORDLISTS_DIR = _MODULE_DIR.parent / "wordlists"
 
-    # ── Authentication ────────────────────────────────────────────────────────
-    "login", "logout", "signin", "signup", "signout",
-    "register", "registration", "auth", "authenticate",
-    "account", "accounts", "user", "users", "profile",
-    "dashboard", "home", "portal", "member", "members",
-    "forgot-password", "reset-password", "change-password",
-    "2fa", "mfa", "otp", "verify", "verification",
-
-    # ── API endpoints ─────────────────────────────────────────────────────────
-    "api", "api/v1", "api/v2", "api/v3", "api/v4",
-    "rest", "rest/v1", "rest/api", "service", "services",
-    "graphql", "gql", "query",
-    "swagger.json", "swagger.yaml", "swagger-ui.html",
-    "openapi.json", "openapi.yaml", "openapi.yml",
-    "api-docs", "api/docs", "apidocs", "redoc", "docs", "documentation",
-    "v1", "v2", "v3", "api/users", "api/admin", "api/config",
-    "api/debug", "api/test", "api/health", "api/status", "api/info",
-    "api/me", "api/profile", "api/token", "api/login", "api/logout",
-    "api/register", "api/reset", "api/forgot",
-    "api/products", "api/orders", "api/payments", "api/invoices",
-    "api/upload", "api/download", "api/export", "api/import",
-
-    # ── Configuration / Secrets ───────────────────────────────────────────────
-    ".env", ".env.local", ".env.development", ".env.staging",
-    ".env.production", ".env.backup", ".env.bak", ".env.old",
-    ".env.example", ".env.sample", ".env.test",
-    "config.php", "config.js", "config.json", "config.yaml",
-    "config.xml", "config.ini", "config.cfg", "config.yml",
-    "configuration.php", "configuration.xml",
-    "settings.php", "settings.py", "settings.json", "settings.xml",
-    "local.php", "local.py", "local.json",
-    "production.php", "production.json",
-    "web.config", "applicationHost.config",
-    "app.config", "application.properties", "application.yml",
-    "database.yml", "database.php", "db.php", "db.json",
-    "secrets.json", "secrets.yaml", "credentials.json", "credentials.xml",
-
-    # ── Git / VCS ─────────────────────────────────────────────────────────────
-    ".git/config", ".git/HEAD", ".git/COMMIT_EDITMSG",
-    ".git/logs/HEAD", ".git/refs/heads/main", ".git/refs/heads/master",
-    ".gitignore", ".gitconfig",
-    ".svn/entries", ".svn/wc.db",
-    ".hg/requires", "CVS/Root",
-    ".DS_Store", "Thumbs.db",
-
-    # ── Backup files ──────────────────────────────────────────────────────────
-    "backup", "backups", "backup.zip", "backup.tar.gz", "backup.sql",
-    "backup.tar", "backup.tgz", "backup.bak",
-    "db.sql", "database.sql", "dump.sql", "mysql.sql",
-    "site.tar.gz", "www.tar.gz", "htdocs.zip", "public_html.zip",
-    "old", "temp", "tmp", "cache", "data",
-    "index.php.bak", "index.php~", "index.php.old",
-    "login.php.bak", "config.php.bak",
-
-    # ── CMS – WordPress ───────────────────────────────────────────────────────
-    "wp-content", "wp-includes", "xmlrpc.php", "wp-json",
-    "wp-json/wp/v2/users", "wp-json/wp/v2/posts",
-    "wp-content/uploads", "wp-content/plugins",
-    "wp-config.php", "wp-config.php.bak",
-
-    # ── CMS – Joomla ──────────────────────────────────────────────────────────
-    "administrator", "index.php/administrator",
-    "configuration.php", "joomla",
-
-    # ── CMS – Drupal ──────────────────────────────────────────────────────────
-    "sites/default/files", "sites/default/settings.php",
-    "CHANGELOG.txt", "core/install.php",
-
-    # ── Frameworks ────────────────────────────────────────────────────────────
-    "console", "rails/info", "rails/info/properties",
-    "actuator", "actuator/health", "actuator/env",
-    "actuator/beans", "actuator/mappings", "actuator/dump",
-    "actuator/trace", "actuator/logfile", "actuator/httptrace",
-    ".well-known/security.txt", ".well-known/change-password",
-    "robots.txt", "sitemap.xml", "sitemap.html", "humans.txt",
-    "crossdomain.xml", "clientaccesspolicy.xml",
-
-    # ── Dev / Debug ───────────────────────────────────────────────────────────
-    "debug", "test", "testing", "dev", "development", "staging",
-    "phpinfo.php", "info.php", "test.php", "debug.php",
-    "status", "healthz", "health", "ping", "metrics",
-    "server-status", "server-info", "nginx-status",
-    "telescope", "horizon", "debugbar",
-    "_profiler", "_wdt", "profiler",
-    "trace", "env", "properties",
-
-    # ── Logs ──────────────────────────────────────────────────────────────────
-    "log", "logs", "error.log", "access.log", "debug.log",
-    "app.log", "error_log", "application.log", "system.log",
-    "audit.log", "security.log", "server.log",
-
-    # ── Upload / Media ────────────────────────────────────────────────────────
-    "upload", "uploads", "files", "file", "media",
-    "images", "image", "img", "attachments", "assets",
-    "static", "public", "storage",
-
-    # ── Source code / Build ───────────────────────────────────────────────────
-    "source", "src", "include", "includes", "lib", "libs",
-    "vendor", "node_modules",
-    "Gemfile", "requirements.txt", "composer.json", "package.json",
-    "yarn.lock", "package-lock.json", "Pipfile",
-    "Makefile", "Dockerfile", "docker-compose.yml", ".dockerignore",
-    "README", "README.md", "CHANGELOG", "LICENSE", "TODO", "INSTALL",
-
-    # ── Security files ────────────────────────────────────────────────────────
-    ".htaccess", ".htpasswd", "htpasswd",
-    "ssl", "certs", "pki",
-
-    # ── Common API patterns ───────────────────────────────────────────────────
-    "search", "query", "find", "results",
-    "export", "import", "download", "report", "reports",
-    "webhook", "webhooks", "callback", "notify", "notification",
-    "subscribe", "unsubscribe", "feed",
-    "token", "tokens", "refresh", "revoke",
-    "session", "sessions", "auth/token", "oauth", "oauth2",
-    "oauth/authorize", "oauth/token", "connect/token",
-    "saml", "saml/sso", "saml/metadata",
-
-    # ── Cloud / Container ─────────────────────────────────────────────────────
-    "metadata", "latest/meta-data", "computeMetadata",
-    "v1beta1/instance", "instance/service-accounts",
-    "169.254.169.254",   # AWS/GCP metadata
+# Minimal fallback if wordlist files are missing
+_FALLBACK_WORDLIST: list[str] = [
+    "admin", "login", "api", "api/v1", "swagger.json", ".env", ".git/HEAD",
+    "backup", "config", "debug", "test", "phpinfo.php", "robots.txt",
+    "sitemap.xml", "wp-admin", "wp-login.php", ".htaccess", "server-status",
+    "actuator/health", "graphql", "health", "status", "metrics",
 ]
+
+# Available category wordlists (loaded on demand)
+WORDLIST_CATEGORIES: dict[str, str] = {
+    "common":       "common.txt",          # Full combined list (41K+)
+    "admin":        "admin-panels.txt",
+    "api":          "api-endpoints.txt",
+    "auth":         "auth-session.txt",
+    "backup":       "backup-files.txt",
+    "cloud":        "cloud-infra.txt",
+    "cms":          "cms-platforms.txt",
+    "config":       "config-secrets.txt",
+    "database":     "database-tools.txt",
+    "debug":        "dev-debug.txt",
+    "dirs":         "common-dirs.txt",
+    "extended":     "extended-paths.txt",
+    "files":        "common-files.txt",
+    "frameworks":   "frameworks.txt",
+    "security":     "security-scanpaths.txt",
+    "vcs":          "vcs-cicd.txt",
+}
+
+
+def load_wordlist(name: str = "common", wordlist_dir: Path | None = None) -> list[str]:
+    """Load a wordlist by category name or file path.
+
+    Args:
+        name: Category name (e.g. "common", "admin", "api") or absolute file path.
+              Empty string returns empty list (useful when only extra_wordlist is wanted).
+        wordlist_dir: Override directory to search for wordlist files.
+
+    Returns:
+        List of unique paths from the wordlist file.
+    """
+    if not name:
+        return []
+
+    wdir = wordlist_dir or _WORDLISTS_DIR
+
+    # Direct file path
+    if os.path.isabs(name) and os.path.isfile(name):
+        return _read_wordlist_file(Path(name))
+
+    # Category lookup
+    filename = WORDLIST_CATEGORIES.get(name, name)
+    filepath = wdir / filename
+
+    # Try with .txt extension if not found
+    if not filepath.exists() and not filename.endswith(".txt"):
+        filepath = wdir / f"{filename}.txt"
+
+    if filepath.exists():
+        return _read_wordlist_file(filepath)
+
+    # Fallback
+    return list(_FALLBACK_WORDLIST)
+
+
+def load_multiple_wordlists(*names: str, wordlist_dir: Path | None = None) -> list[str]:
+    """Load and merge multiple wordlists, deduplicating paths.
+
+    Args:
+        *names: Category names or file paths to load.
+        wordlist_dir: Override directory.
+
+    Returns:
+        Merged, deduplicated list of paths.
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+    for name in names:
+        for path in load_wordlist(name, wordlist_dir):
+            if path not in seen:
+                seen.add(path)
+                result.append(path)
+    return result
+
+
+def available_wordlists(wordlist_dir: Path | None = None) -> dict[str, int]:
+    """List available wordlists with their line counts.
+
+    Returns:
+        Dict of {category_name: line_count} for all available wordlist files.
+    """
+    wdir = wordlist_dir or _WORDLISTS_DIR
+    available: dict[str, int] = {}
+    if not wdir.exists():
+        return available
+    for name, filename in WORDLIST_CATEGORIES.items():
+        fp = wdir / filename
+        if fp.exists():
+            with open(fp, "r") as f:
+                available[name] = sum(1 for line in f if line.strip())
+    return available
+
+
+def _read_wordlist_file(filepath: Path) -> list[str]:
+    """Read a wordlist file, returning unique non-empty lines."""
+    seen: set[str] = set()
+    result: list[str] = []
+    with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            path = line.strip()
+            if path and not path.startswith("#") and path not in seen:
+                seen.add(path)
+                result.append(path)
+    return result
 
 
 # ── Result dataclass ──────────────────────────────────────────────────────────
@@ -188,6 +173,8 @@ class ForcedBrowser:
         base_url:       str,
         session:        requests.Session,
         extra_wordlist: list[str] | None = None,
+        wordlist_name:  str = "common",
+        wordlist_path:  str | None = None,
         workers:        int   = 15,
         timeout:        int   = 8,
         delay:          float = 0.01,
@@ -196,7 +183,21 @@ class ForcedBrowser:
     ):
         self.base_url    = base_url.rstrip("/")
         self.session     = session
-        self.wordlist    = _WORDLIST + (extra_wordlist or [])
+
+        # Load wordlist from file, with optional extras appended
+        if wordlist_path:
+            base_words = load_wordlist(wordlist_path)
+        else:
+            base_words = load_wordlist(wordlist_name)
+
+        if extra_wordlist:
+            seen = set(base_words)
+            for w in extra_wordlist:
+                if w not in seen:
+                    base_words.append(w)
+                    seen.add(w)
+
+        self.wordlist    = base_words
         self.workers     = workers
         self.timeout     = timeout
         self.delay       = delay

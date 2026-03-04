@@ -29,8 +29,9 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from flask import Flask, Response, jsonify, render_template
+from flask import Flask, Response, jsonify, render_template, redirect, url_for, session
 from flask import request as req
+from functools import wraps
 
 # ── DAST Engine modules ───────────────────────────────────────────────────────
 try:
@@ -40,10 +41,11 @@ try:
     from modules.auth         import AuthHandler
     from modules.crawler      import Crawler, SiteMap
     from modules.fuzzer       import Fuzzer
-    from modules.passive      import PassiveScanner, passive_scanner as _passive
+    from modules.passive      import PassiveScanner, passive_scanner as _passive, PassiveInterceptSession
     from modules.oast         import OASTServer, get_or_start_oast
     from modules.openapi      import OpenAPIImporter, import_openapi
-    from modules.forcedbrowse import ForcedBrowser, BrowseResult
+    from modules.forcedbrowse import ForcedBrowser, BrowseResult, load_wordlist, load_multiple_wordlists, available_wordlists, WORDLIST_CATEGORIES
+    from modules.scanner     import VulnerabilityScanner, ScanFinding
     _ENGINE_AVAILABLE = True
 except ImportError as _ei:
     _ENGINE_AVAILABLE = False
@@ -56,7 +58,34 @@ try:
 except ImportError:
     _AJAX_SPIDER_AVAILABLE = False
 
+# Katana (optional — requires Go binary in PATH)
+import shutil as _shutil_top
+_KATANA_AVAILABLE = bool(_shutil_top.which("katana"))
+_HTTPX_AVAILABLE  = bool(_shutil_top.which("httpx"))
+
 app = Flask(__name__)
+app.secret_key = os.environ.get("REVELIO_SECRET", "revelio-dev-secret-2025")
+
+@app.after_request
+def _security_headers(response):
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("X-XSS-Protection", "0")
+    return response
+
+# ── Auth credentials ───────────────────────────────────────────────────────────
+_AUTH_USERS = {
+    "admin": "admin",          # default — change in production
+}
+
+def _login_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get("authenticated"):
+            return redirect(url_for("login_page"))
+        return f(*args, **kwargs)
+    return decorated
 
 # ── Scan History (SQLite) ─────────────────────────────────────────────────────
 
@@ -111,6 +140,20 @@ def _db_get_history(limit: int = 20) -> list:
         return []
 
 _db_init()
+
+
+def _log_activity(event: str, target: str = "", detail: str = ""):
+    """Append a timestamped scan-event to the in-memory activity log."""
+    global _activity_log
+    _activity_log.append({
+        "ts":     datetime.now(timezone.utc).strftime("%H:%M:%S"),
+        "event":  event,
+        "target": target,
+        "detail": detail,
+    })
+    if len(_activity_log) > _ACTIVITY_MAX:
+        _activity_log = _activity_log[-_ACTIVITY_MAX:]
+
 
 # ── SSL context (macOS cert fix) ──────────────────────────────────────────────
 
@@ -1242,7 +1285,32 @@ def _run_static_agent(state: dict, agent_id: str, target: str) -> None:
 
 # ── REST API ──────────────────────────────────────────────────────────────────
 
+@app.route("/login", methods=["GET", "POST"])
+def login_page():
+    if session.get("authenticated"):
+        return redirect(url_for("index"))
+    error = None
+    username = ""
+    if req.method == "POST":
+        username = (req.form.get("username") or "").strip()
+        password = (req.form.get("password") or "").strip()
+        if username in _AUTH_USERS and _AUTH_USERS[username] == password:
+            session["authenticated"] = True
+            session["username"] = username
+            return redirect(url_for("index"))
+        else:
+            error = "Invalid credentials — access denied"
+    return render_template("login.html", error=error, username=username)
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login_page"))
+
+
 @app.route("/")
+@_login_required
 def index():
     return render_template("index.html")
 
@@ -1258,6 +1326,9 @@ def scan_launch():
 
     if not target:
         return jsonify({"success": False, "error": "target required"}), 400
+
+    # Auto-resolve scheme/port — works for http, https, IP:port, etc.
+    target = _resolve_target(target)
 
     ai_mode = bool(_api_keys.get("openai") or _api_keys.get("anthropic"))
 
@@ -1401,6 +1472,15 @@ def scan_history():
     return jsonify({"history": _db_get_history(limit)})
 
 
+@app.route("/api/activity")
+def scan_activity():
+    """Return recent scan activity events (spider, AJAX, passive, engine)."""
+    limit = int(req.args.get("limit", 100))
+    with _engine_lock:
+        events = list(_activity_log[-limit:])
+    return jsonify({"events": list(reversed(events)), "count": len(events)})
+
+
 @app.route("/api/findings/export")
 def findings_export():
     with _lock:
@@ -1514,6 +1594,7 @@ def _render_report_html(findings: list, target: str) -> str:
     total = len(findings)
 
     SEV_ORDER  = ["critical", "high", "medium", "low", "info"]
+    SEV_RANK   = {s: i for i, s in enumerate(SEV_ORDER)}
     SEV_COLORS = {
         "critical": ("#ff4444", "#2d0a0a"),
         "high":     ("#f85149", "#4a0e0e"),
@@ -1524,7 +1605,7 @@ def _render_report_html(findings: list, target: str) -> str:
 
     counts = defaultdict(int)
     for f in findings:
-        counts[f.get("severity", "medium")] += 1
+        counts[f.get("severity", "medium").lower()] += 1
 
     cards = ""
     for s in SEV_ORDER:
@@ -1535,20 +1616,42 @@ def _render_report_html(findings: list, target: str) -> str:
             f'<div class="label">{s.title()}</div></div>\n'
         )
 
-    sev_rank     = {s: i for i, s in enumerate(SEV_ORDER)}
-    sorted_finds = sorted(findings, key=lambda f: sev_rank.get(f.get("severity", "medium"), 2))
+    # ── Group findings by issue description ───────────────────────────────────
+    # Key = finding text. Each group collects all affected URLs + highest severity.
+    groups: dict = {}   # finding_text → {severity, urls, agent, icon, phase, rem}
+    for f in findings:
+        key = f.get("finding", "").strip()
+        sev = f.get("severity", "medium").lower()
+        url = f.get("target") or f.get("url", "")
+        if key not in groups:
+            groups[key] = {
+                "severity": sev,
+                "urls":     [],
+                "agent":    f.get("agent", ""),
+                "icon":     f.get("icon", "🔍"),
+                "phase":    f.get("phase", ""),
+            }
+        # Escalate to highest severity
+        if SEV_RANK.get(sev, 4) < SEV_RANK.get(groups[key]["severity"], 4):
+            groups[key]["severity"] = sev
+        if url and url not in groups[key]["urls"]:
+            groups[key]["urls"].append(url)
+
+    # Sort groups by severity
+    sorted_groups = sorted(groups.items(),
+                           key=lambda kv: SEV_RANK.get(kv[1]["severity"], 4))
 
     rows = ""
-    for f in sorted_finds:
-        sev      = f.get("severity", "medium")
-        fg, bg   = SEV_COLORS.get(sev, ("#888", "#222"))
-        badge    = (
+    for finding_text, g in sorted_groups:
+        sev    = g["severity"]
+        fg, bg = SEV_COLORS.get(sev, ("#888", "#222"))
+        badge  = (
             f'<span style="background:{bg};color:{fg};padding:2px 8px;'
             f'border-radius:3px;font-size:11px;font-weight:700;">{sev.upper()}</span>'
         )
-        text = (f.get("finding", "")
-                .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
-        rem  = _get_remediation(f.get("finding", ""), f.get("agent", ""))
+        text   = (finding_text
+                  .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+        rem    = _get_remediation(finding_text, g["agent"])
         cvss_cell = ""
         if rem:
             cvss_cell = (
@@ -1558,19 +1661,33 @@ def _render_report_html(findings: list, target: str) -> str:
                 f'<div style="font-size:11px;margin-top:3px;color:#adbac7;">'
                 f'<b>Fix:</b> {rem.get("fix","")}</div>'
             )
+        url_count  = len(g["urls"])
+        url_suffix = (
+            f'<div style="margin-top:6px;font-size:11px;color:#7d8590;">'
+            f'<b style="color:#adbac7">Affected ({url_count}):</b> '
+            + ", ".join(
+                f'<span style="font-family:monospace;color:#79c0ff">{u.replace("&","&amp;").replace("<","&lt;")}</span>'
+                for u in g["urls"][:30]
+            )
+            + ("…" if url_count > 30 else "")
+            + "</div>"
+        ) if g["urls"] else ""
+
         rows += (
             f"<tr><td>{badge}</td>"
-            f"<td>{f.get('icon','')} {f.get('phase','')}</td>"
-            f"<td>{f.get('agent','')}</td>"
-            f"<td>{text}{cvss_cell}</td></tr>\n"
+            f"<td>{g['icon']} {g['phase']}</td>"
+            f"<td>{g['agent']}</td>"
+            f"<td>{text}{cvss_cell}{url_suffix}</td></tr>\n"
         )
 
     table = (
         '<table><thead><tr>'
-        '<th>Severity</th><th>Phase</th><th>Agent</th><th>Finding / Remediation</th>'
+        '<th>Severity</th><th>Phase</th><th>Source</th>'
+        '<th>Issue / Remediation / Affected URLs</th>'
         '</tr></thead><tbody>' + rows + '</tbody></table>'
     ) if findings else '<div class="no-findings">No findings recorded yet.</div>'
 
+    unique_issues = len(groups)
     css = (
         "body{font-family:system-ui,-apple-system,sans-serif;background:#0d1117;color:#e6edf3;margin:0;padding:24px}"
         "h1{font-size:22px;margin-bottom:4px}"
@@ -1593,7 +1710,8 @@ def _render_report_html(findings: list, target: str) -> str:
         '<h1>DAST Security Report</h1>'
         f'<div class="meta">Target: <strong>{target}</strong>'
         f'&nbsp;&nbsp;|&nbsp;&nbsp;Generated: {ts}'
-        f'&nbsp;&nbsp;|&nbsp;&nbsp;Total findings: <strong>{total}</strong></div>'
+        f'&nbsp;&nbsp;|&nbsp;&nbsp;Total findings: <strong>{total}</strong>'
+        f'&nbsp;&nbsp;|&nbsp;&nbsp;Unique issues: <strong>{unique_issues}</strong></div>'
         '<div class="summary">' + cards + '</div>'
         + table
         + '</body></html>'
@@ -1604,6 +1722,18 @@ def _render_report_html(findings: list, target: str) -> str:
 def findings_report():
     with _lock:
         data = list(_findings)
+    # Merge passive findings (normalize schema to match agent findings)
+    with _engine_lock:
+        for pf in _passive_findings:
+            data.append({
+                "finding":  pf.get("finding", ""),
+                "severity": pf.get("severity", "Info").lower(),
+                "target":   pf.get("url", ""),
+                "url":      pf.get("url", ""),
+                "agent":    "Passive Scanner",
+                "icon":     "🛡",
+                "phase":    "Passive",
+            })
     html     = _render_report_html(data, _scan_target or "unknown")
     filename = f"dast_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
     return Response(
@@ -1631,8 +1761,10 @@ _proxy_port    = 8090
 _site_map: dict = {}   # url → {methods, params, content_type, auth_seen}
 
 
+_proxy_passive_seen: set = set()  # dedup: (path, category, finding)
+
 class _DASTProxyAddon:
-    """mitmproxy addon — passive scans every intercepted response, builds site map."""
+    """mitmproxy addon — full passive scans every intercepted response, builds site map."""
 
     def response(self, flow: "_mhttp.HTTPFlow") -> None:
         url    = flow.request.pretty_url
@@ -1659,23 +1791,47 @@ class _DASTProxyAddon:
             if "authorization" in (k.lower() for k in flow.request.headers):
                 entry["auth_seen"] = True
 
-        # ── Passive scan on every response ────────────────────────────────────
-        combined = "\n".join(f"{k}: {v}" for k, v in hdrs.items()) + "\n" + body[:8000]
-        new_finds = _proxy_passive_scan(url, flow.response.status_code, combined)
-        if new_finds:
+        # ── Full passive scan on every proxied response (278 rules — ZAP parity) ─
+        try:
+            cookies = {}
+            for c_hdr in flow.response.headers.get_all("set-cookie"):
+                if "=" in c_hdr:
+                    cname = c_hdr.split("=", 1)[0].strip()
+                    cval  = c_hdr.split("=", 1)[1].split(";")[0].strip()
+                    cookies[cname] = cval
+        except Exception:
+            cookies = {}
+        pf_results = _passive.scan(
+            url=url, status_code=flow.response.status_code,
+            resp_headers=hdrs, resp_body=body[:8000],
+            cookies=cookies,
+        )
+        if pf_results:
+            from urllib.parse import urlparse as _pup
+            path = _pup(url).path
+            new_count = 0
             with _lock:
-                for f in new_finds:
-                    _findings.append({
-                        "agent": "Proxy Passive Scanner",
-                        "agent_id": "proxy",
-                        "icon": "🔌",
-                        "phase": "Discovery",
-                        "finding": f["text"],
-                        "severity": f["severity"],
-                        "target": url,
-                        "ts": datetime.now(timezone.utc).isoformat(),
-                    })
-            _trigger_hook("on_finding", new_finds[-1])
+                for pf in pf_results:
+                    dedup_key = (path, pf.category, pf.finding)
+                    if dedup_key not in _proxy_passive_seen:
+                        _proxy_passive_seen.add(dedup_key)
+                        _findings.append({
+                            "agent": "Proxy Passive Scanner",
+                            "agent_id": "proxy",
+                            "icon": "🔌",
+                            "phase": "Discovery",
+                            "finding": pf.finding,
+                            "severity": pf.severity,
+                            "type": pf.category,
+                            "url": url,
+                            "evidence": pf.evidence,
+                            "remediation": pf.remediation,
+                            "target": url,
+                            "ts": datetime.now(timezone.utc).isoformat(),
+                        })
+                        new_count += 1
+            if new_count:
+                _trigger_hook("on_finding", {"text": pf_results[-1].finding, "severity": pf_results[-1].severity})
 
         # ── Session token analysis ─────────────────────────────────────────────
         set_cookie = hdrs.get("set-cookie", "")
@@ -2008,6 +2164,9 @@ def ajax_crawl():
     target = data.get("target", _scan_target).strip()
     if not target:
         return jsonify({"success": False, "error": "target required"}), 400
+
+    # Auto-resolve scheme/port before handing to Playwright
+    target = _resolve_target(target)
 
     def _bg():
         urls = _playwright_ajax_crawl(target, _proxy_port)
@@ -2464,13 +2623,18 @@ class _TraditionalSpider:
             seen.add(url)
 
             try:
-                import urllib.request as _ur
-                req_obj = _ur.Request(url, headers={"User-Agent": "DAST-Spider/1.0"})
-                with _ur.urlopen(req_obj, timeout=self.timeout) as resp:
-                    status       = resp.status
-                    content_type = resp.headers.get("Content-Type", "")
-                    raw          = resp.read(1_000_000)   # cap at 1 MB per page
-                    body         = raw.decode("utf-8", errors="replace") if "text/html" in content_type else ""
+                import requests as _req_spider
+                import urllib3 as _u3
+                _u3.disable_warnings(_u3.exceptions.InsecureRequestWarning)
+                _sr = _req_spider.get(
+                    url, timeout=self.timeout,
+                    verify=False,
+                    allow_redirects=True,
+                    headers={"User-Agent": "DAST-Spider/1.0", "Connection": "close"},
+                )
+                status       = _sr.status_code
+                content_type = _sr.headers.get("Content-Type", "")
+                body         = _sr.text[:1_000_000] if "text/html" in content_type else ""
             except Exception:
                 continue
 
@@ -2516,6 +2680,9 @@ def spider_start():
     if _spider and _spider.is_running():
         return jsonify({"error": "Spider already running", "status": _spider.status}), 409
 
+    # Auto-resolve scheme/port (http→https upgrade, alt-port detection)
+    target = _resolve_target(target)
+
     _spider = _TraditionalSpider(
         target    = target,
         max_depth = int(data.get("max_depth", 5)),
@@ -2524,6 +2691,7 @@ def spider_start():
         timeout   = int(data.get("timeout", 10)),
     )
     _spider.start()
+    _log_activity("spider_start", target)
     _trigger_hook("before_scan", {"mode": "traditional_spider", "target": target})
     return jsonify({"started": True, "target": target,
                     "max_depth": _spider.max_depth, "scope": _spider.scope})
@@ -2533,6 +2701,9 @@ def spider_start():
 def spider_stop():
     if _spider:
         _spider.stop()
+        with _spider._lock:
+            found = len(_spider.found)
+        _log_activity("spider_stop", _spider.target, f"{found} URLs found")
         return jsonify({"stopped": True})
     return jsonify({"stopped": False, "error": "No spider running"})
 
@@ -2793,6 +2964,23 @@ def openapi_import():
     _openapi_endpoints.clear()
     _openapi_endpoints.extend(endpoints)
 
+    # ── Auto-scan (optional) ──────────────────────────────────────
+    auto_scan      = data.get("auto_scan", False)
+    scan_started   = False
+    scan_skipped   = ""
+
+    if auto_scan:
+        with _engine_lock:
+            already_running = _engine_running
+        if already_running:
+            scan_skipped = "engine scan already running"
+        else:
+            # Convert endpoints to InputSurface objects via modules/openapi.py
+            spec_source = result["spec"]
+            base_url_override = parsed["base_url"]
+            scan_started = True
+            _start_openapi_auto_scan(spec_source, base_url_override, source_url)
+
     return jsonify({
         "success":        True,
         "title":          parsed["title"],
@@ -2801,7 +2989,257 @@ def openapi_import():
         "base_url":       parsed["base_url"],
         "endpoints_found": len(endpoints),
         "urls_added_to_sitemap": len(endpoints),
+        "scan_started":   scan_started,
+        "scan_skipped":   scan_skipped or None,
     })
+
+
+# ── OpenAPI Auto-Scan Worker ─────────────────────────────────────────────────
+
+def _start_openapi_auto_scan(spec: dict, base_url: str, source_url: str):
+    """Launch a background scan of all endpoints discovered from an OpenAPI spec."""
+    global _engine_running, _engine_stop_event, _engine_thread
+    global _engine_sitemap, _engine_fuzz_results, _engine_fingerprint
+    global _engine_status_msg, _engine_progress
+
+    _engine_stop_event   = threading.Event()
+    _engine_sitemap      = None
+    _engine_fuzz_results = []
+    _engine_fingerprint  = {}
+    _engine_status_msg   = "openapi auto-scan starting"
+    _engine_progress     = {
+        "phase":          "openapi_import",
+        "pages_crawled":  0,
+        "surfaces_found": 0,
+        "payloads_sent":  0,
+        "findings_count": 0,
+        "source":         "openapi",
+    }
+    _engine_running = True
+
+    _engine_thread = threading.Thread(
+        target=_openapi_auto_scan_worker,
+        args=(spec, base_url, source_url),
+        daemon=True,
+        name="dast-openapi-autoscan",
+    )
+    _engine_thread.start()
+
+
+def _openapi_auto_scan_worker(spec: dict, base_url: str, source_url: str):
+    """Background thread: convert OpenAPI spec → InputSurfaces → passive + fuzz + OWASP."""
+    global _engine_sitemap, _engine_fuzz_results, _engine_fingerprint
+    global _engine_running, _engine_status_msg, _engine_progress
+    global _passive_findings
+
+    try:
+        if not _ENGINE_AVAILABLE:
+            _engine_status_msg = "error: engine modules not loaded"
+            return
+
+        # ── 0. Build surfaces from spec ──────────────────────────────────────
+        _engine_status_msg = "parsing spec into attack surfaces"
+        _engine_progress["phase"] = "parsing"
+
+        surfaces = import_openapi(spec, base_url=base_url)
+        if not surfaces:
+            _engine_status_msg = "complete (no fuzzable surfaces found)"
+            _engine_progress["phase"] = "complete"
+            return
+
+        # Build a SiteMap from the imported surfaces
+        from modules.crawler import SiteMap
+        sitemap = SiteMap()
+        seen_urls = set()
+        for s in surfaces:
+            sitemap.add_surface(s)
+            if s.url not in seen_urls:
+                sitemap.add_page(s.url, 0, "", {}, title=f"OpenAPI: {s.method} {s.url}")
+                seen_urls.add(s.url)
+
+        with _engine_lock:
+            _engine_sitemap = sitemap
+            _engine_progress["surfaces_found"] = len(surfaces)
+
+        if _engine_stop_event.is_set():
+            _engine_status_msg = "stopped"
+            return
+
+        # ── 1. Setup session ─────────────────────────────────────────────────
+        target = base_url or source_url
+        scope  = ScopeManager(target)
+        session = _engine_auth_handler.session if _engine_auth_handler else None
+
+        import requests as _req_lib
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+        if session is None:
+            session = PassiveInterceptSession()
+            session.verify = False
+            session.headers["User-Agent"] = "Mozilla/5.0 (DAST-Engine/2.0 OpenAPI-AutoScan)"
+            _retry = Retry(total=2, connect=2, read=2, backoff_factor=0.3,
+                           status_forcelist=[500, 502, 503, 504],
+                           allowed_methods=["HEAD", "GET", "OPTIONS"])
+            _adapter = HTTPAdapter(max_retries=_retry)
+            session.mount("http://", _adapter)
+            session.mount("https://", _adapter)
+
+        # ── 2. Passive scan each unique URL ──────────────────────────────────
+        _engine_status_msg = "passive scanning OpenAPI endpoints"
+        _engine_progress["phase"] = "passive"
+        p_count = 0
+
+        for page_url in seen_urls:
+            if _engine_stop_event.is_set():
+                break
+            try:
+                resp = session.get(page_url, timeout=10)
+                pf   = _passive.scan(
+                    url             = page_url,
+                    status_code     = resp.status_code,
+                    resp_headers    = dict(resp.headers),
+                    resp_body       = resp.text[:8000],
+                    cookies         = {c.name: c.value for c in session.cookies},
+                    request_headers = dict(session.headers),
+                )
+                for f in pf:
+                    d = f.to_dict()
+                    with _engine_lock:
+                        _passive_findings.append(d)
+                        p_count += 1
+                        _engine_progress["passive_count"] = p_count
+                    with _lock:
+                        _findings.append({
+                            "agent":       "Passive Scanner",
+                            "severity":    f.severity,
+                            "type":        f.category,
+                            "finding":     f.finding,
+                            "url":         page_url,
+                            "evidence":    f.evidence,
+                            "remediation": f.remediation,
+                            "cwe":         f.cwe,
+                        })
+            except Exception:
+                pass
+
+        if _engine_stop_event.is_set():
+            _engine_status_msg = "stopped"
+            return
+
+        # ── 3. Fingerprint (first reachable URL) ────────────────────────────
+        _engine_status_msg = "fingerprinting"
+        _engine_progress["phase"] = "fingerprinting"
+
+        for page_url in seen_urls:
+            try:
+                fp_resp = session.get(page_url, timeout=10)
+                fp = fingerprint(
+                    url          = page_url,
+                    status_code  = fp_resp.status_code,
+                    resp_headers = dict(fp_resp.headers),
+                    resp_body    = fp_resp.text[:8000],
+                    cookies      = {c.name: c.value for c in session.cookies},
+                )
+                with _engine_lock:
+                    _engine_fingerprint = fp
+                    sitemap.tech = fp
+                break
+            except Exception:
+                continue
+
+        if _engine_stop_event.is_set():
+            _engine_status_msg = "stopped"
+            return
+
+        # ── 4. Fuzz all surfaces ─────────────────────────────────────────────
+        _engine_status_msg = "fuzzing OpenAPI surfaces"
+        _engine_progress["phase"] = "fuzzing"
+
+        fuzzer = Fuzzer(
+            scope      = scope,
+            session    = session,
+            timeout    = 10,
+            rate_limit = 0.05,
+            stop_event = _engine_stop_event,
+        )
+        results = fuzzer.fuzz_all(sitemap.surfaces)
+
+        with _engine_lock:
+            _engine_fuzz_results = [
+                {k: v for k, v in r.__dict__.items()} for r in results
+            ]
+            _engine_progress["findings_count"] = len(results)
+            _engine_progress["payloads_sent"]  = len(sitemap.surfaces) * 8
+
+        for r in results:
+            with _lock:
+                _findings.append({
+                    "agent":       "Engine Fuzzer",
+                    "severity":    r.severity,
+                    "type":        r.vuln_type,
+                    "finding":     r.finding,
+                    "url":         r.url,
+                    "param":       r.param,
+                    "payload":     r.payload,
+                    "evidence_id": r.evidence_id,
+                    "resp_time_ms": r.resp_time_ms,
+                })
+
+        # ── 5. VulnerabilityScanner — OWASP specialized checks ──────────────
+        if not _engine_stop_event.is_set():
+            _engine_status_msg = "running OWASP specialized checks on OpenAPI endpoints"
+            _engine_progress["phase"] = "owasp_checks"
+
+            def _on_scan_finding(sf):
+                with _lock:
+                    _findings.append({
+                        "agent":         "DAST Scanner",
+                        "agent_id":      "scanner",
+                        "icon":          "⚙️",
+                        "phase":         "Active Scanning",
+                        "finding":       sf.finding,
+                        "severity":      sf.severity,
+                        "target":        sf.url,
+                        "url":           sf.url,
+                        "param":         sf.param,
+                        "payload":       sf.payload,
+                        "type":          sf.vuln_type,
+                        "owasp":         sf.owasp_category,
+                        "cwe":           sf.cwe,
+                        "remediation":   sf.remediation,
+                        "proof":         sf.proof,
+                        "chain_id":      sf.chain_id,
+                        "chain_desc":    sf.chain_desc,
+                        "evidence_id":   sf.evidence_id,
+                        "resp_time_ms":  sf.resp_time_ms,
+                        "status_code":   sf.status_code,
+                        "ts":            sf.ts,
+                    })
+
+            scanner = VulnerabilityScanner(
+                target     = target,
+                scope      = scope,
+                session    = session,
+                ev_store   = _ev_store,
+                stop_event = _engine_stop_event,
+                on_finding = _on_scan_finding,
+                timeout    = 10,
+                rate_limit = 0.05,
+            )
+            scan_findings = scanner.scan(sitemap)
+
+            with _engine_lock:
+                _engine_progress["findings_count"] = len(results) + len(scan_findings)
+
+        _engine_status_msg = "complete"
+        _engine_progress["phase"] = "complete"
+
+    except Exception as exc:
+        _engine_status_msg = f"error: {exc}"
+        _engine_progress["phase"] = "error"
+    finally:
+        with _engine_lock:
+            _engine_running = False
 
 
 @app.route("/api/openapi/status")
@@ -3000,6 +3438,7 @@ _engine_progress:     dict                       = {
     "findings_count": 0,
     "passive_count":  0,
     "browse_count":   0,
+    "detected_url":   None,   # set when engine auto-discovers a different port
 }
 
 # Extra module state
@@ -3009,9 +3448,13 @@ _browse_running:      bool = False
 _browse_stop_event:   threading.Event = threading.Event()
 _browse_thread:       Optional[threading.Thread] = None
 _ajax_running:        bool = False
+_ajax_urls_found:     int  = 0
+_ajax_pages:          list = []   # [{url, status, content_type, source}] from last AJAX crawl
 _ajax_stop_event:     threading.Event = threading.Event()
 _ajax_thread:         Optional[threading.Thread] = None
 _openapi_surfaces:    list = []    # InputSurface dicts from OpenAPI import
+_activity_log:        list = []    # Scan activity events {ts, event, target, detail}
+_ACTIVITY_MAX        = 300         # Keep last N events
 
 
 def _engine_scan_worker(target: str, config: dict):
@@ -3030,10 +3473,33 @@ def _engine_scan_worker(target: str, config: dict):
         session = _engine_auth_handler.session if _engine_auth_handler else None
 
         import requests as _req_lib
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
         if session is None:
-            session = _req_lib.Session()
+            session = PassiveInterceptSession()
             session.verify = False
             session.headers["User-Agent"] = "Mozilla/5.0 (DAST-Engine/2.0)"
+            # Retry on connection-level errors (helps with raw IPs and non-standard stacks)
+            _retry = Retry(total=2, connect=2, read=2, backoff_factor=0.3,
+                           status_forcelist=[500, 502, 503, 504],
+                           allowed_methods=["HEAD", "GET", "OPTIONS"])
+            _adapter = HTTPAdapter(max_retries=_retry)
+            session.mount("http://", _adapter)
+            session.mount("https://", _adapter)
+
+        # ── 0.5 Preflight — verify target responds; auto-detect port if not ──
+        _engine_status_msg = "probing target"
+        _engine_progress["phase"] = "preflight"
+
+        # Use shared probe helper — handles http→https upgrade, alt-port discovery
+        _probe = _probe_target(target)
+        if not _probe["reachable"]:
+            _engine_status_msg = "error: target unreachable — check URL and network"
+            return
+        if _probe["port_changed"] or _probe["resolved"] != target:
+            target = _probe["resolved"]
+            scope  = ScopeManager(target)
+            _engine_progress["detected_url"] = target
 
         # ── 1. Crawl ──────────────────────────────────────────────────────────
         _engine_status_msg = "crawling"
@@ -3164,6 +3630,79 @@ def _engine_scan_worker(target: str, config: dict):
             }
             with _lock:
                 _findings.append(finding)
+
+        # ── 5. VulnerabilityScanner — specialized OWASP checks + chaining ────
+        if not _engine_stop_event.is_set():
+            _engine_status_msg = "running OWASP specialized checks"
+            _engine_progress["phase"] = "owasp_checks"
+
+            def _on_scan_finding(sf: "ScanFinding"):  # type: ignore
+                with _lock:
+                    _findings.append({
+                        "agent":         "DAST Scanner",
+                        "agent_id":      "scanner",
+                        "icon":          "⚙️",
+                        "phase":         "Active Scanning",
+                        "finding":       sf.finding,
+                        "severity":      sf.severity,
+                        "target":        sf.url,
+                        "url":           sf.url,
+                        "param":         sf.param,
+                        "payload":       sf.payload,
+                        "type":          sf.vuln_type,
+                        "owasp":         sf.owasp_category,
+                        "cwe":           sf.cwe,
+                        "remediation":   sf.remediation,
+                        "proof":         sf.proof,
+                        "chain_id":      sf.chain_id,
+                        "chain_desc":    sf.chain_desc,
+                        "evidence_id":   sf.evidence_id,
+                        "resp_time_ms":  sf.resp_time_ms,
+                        "status_code":   sf.status_code,
+                        "ts":            sf.ts,
+                    })
+
+            scanner = VulnerabilityScanner(
+                target     = target,
+                scope      = scope,
+                session    = session,
+                ev_store   = _ev_store,
+                stop_event = _engine_stop_event,
+                on_finding = _on_scan_finding,
+                timeout    = config.get("timeout", 10),
+                rate_limit = config.get("delay", 0.05),
+            )
+            scan_findings = scanner.scan(sitemap)
+
+            # Count distinct scanner findings (passive phase is deduplicated)
+            with _engine_lock:
+                _engine_progress["findings_count"] = len(results) + len(scan_findings)
+
+        # ── Merge intercepted passive findings from ALL phases ────────────────
+        if hasattr(session, 'get_findings'):
+            intercepted = session.get_findings()
+            if intercepted:
+                existing_keys = set()
+                for f in _passive_findings:
+                    existing_keys.add((f.get("url", ""), f.get("category", ""), f.get("finding", "")))
+                intercept_count = 0
+                for f in intercepted:
+                    fd = f.to_dict()
+                    key = (fd.get("url", ""), fd.get("category", ""), fd.get("finding", ""))
+                    if key not in existing_keys:
+                        existing_keys.add(key)
+                        _passive_findings.append(fd)
+                        with _lock:
+                            _findings.append({
+                                "agent":    "Passive Scanner (Intercept)",
+                                "severity": fd.get("severity", "Info"),
+                                "type":     fd.get("category", ""),
+                                "detail":   fd.get("finding", ""),
+                                "url":      fd.get("url", ""),
+                                "ts":       datetime.now(timezone.utc).isoformat(),
+                            })
+                        intercept_count += 1
+                _engine_progress["passive_intercept_count"] = intercept_count
 
         _engine_status_msg = "complete"
         _engine_progress["phase"] = "complete"
@@ -3413,26 +3952,75 @@ def passive_findings():
 
 @app.route("/api/passive/scan", methods=["POST"])
 def passive_scan_url():
-    """Passively scan a single URL on demand (no fuzzing)."""
+    """Passively scan target + all already-crawled pages. No fuzzing."""
+    global _passive_findings
     if not _ENGINE_AVAILABLE:
         return jsonify({"error": "Engine not available"}), 503
-    data = req.get_json(silent=True) or {}
-    url  = (data.get("url") or "").strip()
-    if not url:
-        return jsonify({"error": "url required"}), 400
-    try:
-        import requests as _r
-        s = _r.Session()
-        s.verify = False
-        r = s.get(url, timeout=10)
-        pf = _passive.scan(
-            url=url, status_code=r.status_code,
-            resp_headers=dict(r.headers), resp_body=r.text[:8000],
-            cookies={c.name: c.value for c in s.cookies},
-        )
-        return jsonify({"findings": [f.to_dict() for f in pf], "count": len(pf)})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+
+    data   = req.get_json(silent=True) or {}
+    target = (data.get("target") or data.get("url") or _scan_target or "").strip()
+    if not target:
+        return jsonify({"error": "target required — enter a URL in the scan bar"}), 400
+
+    # Auto-resolve scheme/port
+    target = _resolve_target(target)
+
+    import urllib3 as _u3
+    _u3.disable_warnings(_u3.exceptions.InsecureRequestWarning)
+    s = PassiveInterceptSession()
+    s.verify = False
+    s.headers["User-Agent"] = "Mozilla/5.0 (DAST-Passive/2.0)"
+
+    # Build URL list: target + all pages from engine sitemap (if already crawled)
+    urls_to_scan: list[str] = [target]
+    with _engine_lock:
+        if _engine_sitemap:
+            sitemap_urls = list(_engine_sitemap.pages.keys())
+            # Exclude noise (assets, fonts, JS bundles) — focus on HTML + API endpoints
+            for u in sitemap_urls:
+                ext = u.rsplit(".", 1)[-1].lower().split("?")[0]
+                if ext not in ("js", "css", "png", "jpg", "jpeg", "gif", "ico",
+                               "svg", "woff", "woff2", "ttf", "eot", "map"):
+                    if u not in urls_to_scan:
+                        urls_to_scan.append(u)
+        # Also add common paths not yet crawled
+        common = ["/robots.txt", "/sitemap.xml", "/.well-known/security.txt",
+                  "/api", "/swagger.json", "/openapi.json", "/api-docs"]
+        for path in common:
+            u = target.rstrip("/") + path
+            if u not in urls_to_scan:
+                urls_to_scan.append(u)
+
+    # Cap at 50 pages for on-demand scan
+    urls_to_scan = urls_to_scan[:50]
+
+    all_findings: list = []
+    for url in urls_to_scan:
+        try:
+            r = s.get(url, timeout=8, allow_redirects=True)
+            pf = _passive.scan(
+                url=url, status_code=r.status_code,
+                resp_headers=dict(r.headers),
+                resp_body=r.text[:8000],
+                cookies={c.name: c.value for c in s.cookies},
+                request_headers=dict(s.headers),
+            )
+            all_findings.extend(pf)
+        except Exception:
+            continue
+
+    # Persist so /api/passive/findings returns results
+    with _engine_lock:
+        _passive_findings = [f.to_dict() for f in all_findings]
+
+    _log_activity("passive_scan", target,
+                  f"{len(all_findings)} findings across {len(urls_to_scan)} pages")
+
+    return jsonify({
+        "findings_count": len(all_findings),
+        "urls_scanned":   len(urls_to_scan),
+        "findings":       [f.to_dict() for f in all_findings[:20]],
+    })
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -3507,7 +4095,9 @@ def forcebrowse_start():
     if not target:
         return jsonify({"error": "target required"}), 400
 
-    extra = data.get("extra_wordlist", [])
+    extra       = data.get("extra_wordlist", [])
+    wordlist    = data.get("wordlist", "common")       # category name or file path
+    categories  = data.get("wordlist_categories", [])  # list of category names to merge
 
     _browse_stop_event = threading.Event()
     _browse_results    = []
@@ -3516,8 +4106,7 @@ def forcebrowse_start():
     def _browse_worker():
         global _browse_running, _browse_results
         try:
-            import requests as _r
-            sess = _r.Session(); sess.verify = False
+            sess = PassiveInterceptSession(); sess.verify = False
             sess.headers["User-Agent"] = "Mozilla/5.0 (DAST-ForcedBrowse/2.0)"
 
             def _cb(result):
@@ -3532,14 +4121,25 @@ def forcebrowse_start():
                         "url":      result.url,
                     })
 
+            # Build wordlist kwargs
+            fb_kwargs = {}
+            if categories:
+                merged = load_multiple_wordlists(*categories)
+                fb_kwargs["wordlist_name"] = ""
+                fb_kwargs["extra_wordlist"] = merged + extra
+            else:
+                fb_kwargs["wordlist_name"] = wordlist
+                if extra:
+                    fb_kwargs["extra_wordlist"] = extra
+
             fb = ForcedBrowser(
                 base_url       = target,
                 session        = sess,
-                extra_wordlist = extra,
                 workers        = data.get("workers", 15),
                 timeout        = data.get("timeout", 8),
                 stop_event     = _browse_stop_event,
                 callback       = _cb,
+                **fb_kwargs,
             )
             fb.run()
         except Exception:
@@ -3565,6 +4165,180 @@ def forcebrowse_results():
         results = list(_browse_results)
         running = _browse_running
     return jsonify({"results": results, "count": len(results), "running": running})
+
+
+@app.route("/api/engine/wordlists")
+def wordlists_list():
+    """List available wordlist categories with path counts."""
+    if not _ENGINE_AVAILABLE:
+        return jsonify({"error": "Engine not available"}), 503
+    avail = available_wordlists()
+    cats = []
+    for name, filename in sorted(WORDLIST_CATEGORIES.items()):
+        count = avail.get(name, 0)
+        cats.append({"name": name, "filename": filename, "count": count, "available": count > 0})
+    return jsonify({"wordlists": cats, "total_categories": len(cats)})
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ██  GRAPHQL SECURITY SCANNER (standalone)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_graphql_scan_running  = False
+_graphql_scan_findings: list = []
+_graphql_scan_status   = "idle"
+_graphql_scan_stop     = threading.Event()
+
+@app.route("/api/engine/graphql/scan", methods=["POST"])
+def graphql_scan_start():
+    """Launch a standalone GraphQL security scan against the configured target."""
+    global _graphql_scan_running, _graphql_scan_findings, _graphql_scan_status, _graphql_scan_stop
+    if not _ENGINE_AVAILABLE:
+        return jsonify({"error": "Engine not available"}), 503
+    if _graphql_scan_running:
+        return jsonify({"error": "GraphQL scan already running"}), 409
+
+    data = req.get_json(silent=True) or {}
+    target = (data.get("target") or _scan_target or "").strip()
+    if not target:
+        return jsonify({"error": "No target configured — set target in Engine tab first"}), 400
+
+    _graphql_scan_running  = True
+    _graphql_scan_findings = []
+    _graphql_scan_status   = "starting"
+    _graphql_scan_stop     = threading.Event()
+
+    def _gql_worker(t):
+        global _graphql_scan_running, _graphql_scan_status
+        try:
+            from modules.graphql import GraphQLScanner
+
+            _graphql_scan_status = "discovering endpoints"
+            scanner = GraphQLScanner(
+                target=t,
+                stop_event=_graphql_scan_stop,
+                timeout=10,
+            )
+            # Collect known GraphQL pages from sitemap if available
+            extra = [url for url in _all_pages if
+                     any(kw in (url if isinstance(url, str) else url.get("url", "")).lower()
+                         for kw in ("graphql", "gql", "/query", "graphiql"))]
+            extra_urls = [u if isinstance(u, str) else u.get("url", "") for u in extra]
+
+            _graphql_scan_status = "running 12 security tests"
+            results = scanner.scan(extra_urls=extra_urls)
+            with _engine_lock:
+                _graphql_scan_findings.extend(results)
+            _graphql_scan_status = f"complete — {len(results)} findings"
+        except Exception as e:
+            _graphql_scan_status = f"error: {e}"
+        finally:
+            _graphql_scan_running = False
+
+    threading.Thread(target=_gql_worker, args=(target,), daemon=True).start()
+    return jsonify({"success": True, "target": target})
+
+
+@app.route("/api/engine/graphql/stop", methods=["POST"])
+def graphql_scan_stop():
+    _graphql_scan_stop.set()
+    return jsonify({"success": True})
+
+
+@app.route("/api/engine/graphql/status")
+def graphql_scan_status():
+    return jsonify({
+        "running":  _graphql_scan_running,
+        "status":   _graphql_scan_status,
+        "findings": len(_graphql_scan_findings),
+    })
+
+
+@app.route("/api/engine/graphql/results")
+def graphql_scan_results():
+    with _engine_lock:
+        results = list(_graphql_scan_findings)
+    return jsonify({"results": results, "count": len(results), "running": _graphql_scan_running})
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ██  WEBSOCKET SECURITY SCANNER (standalone)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_ws_scan_running  = False
+_ws_scan_findings: list = []
+_ws_scan_status   = "idle"
+_ws_scan_stop     = threading.Event()
+
+@app.route("/api/engine/websocket/scan", methods=["POST"])
+def ws_scan_start():
+    """Launch a standalone WebSocket security scan against the configured target."""
+    global _ws_scan_running, _ws_scan_findings, _ws_scan_status, _ws_scan_stop
+    if not _ENGINE_AVAILABLE:
+        return jsonify({"error": "Engine not available"}), 503
+    if _ws_scan_running:
+        return jsonify({"error": "WebSocket scan already running"}), 409
+
+    data = req.get_json(silent=True) or {}
+    target = (data.get("target") or _scan_target or "").strip()
+    if not target:
+        return jsonify({"error": "No target configured — set target in Engine tab first"}), 400
+
+    _ws_scan_running  = True
+    _ws_scan_findings = []
+    _ws_scan_status   = "starting"
+    _ws_scan_stop     = threading.Event()
+
+    def _ws_worker(t):
+        global _ws_scan_running, _ws_scan_status
+        try:
+            from modules.websocket import WebSocketScanner
+
+            _ws_scan_status = "discovering WebSocket endpoints"
+            scanner = WebSocketScanner(
+                target=t,
+                stop_event=_ws_scan_stop,
+                timeout=5,
+            )
+            # Collect known WS pages from sitemap if available
+            extra = [u if isinstance(u, str) else u.get("url", "") for u in _all_pages
+                     if any(kw in (u if isinstance(u, str) else u.get("url", "")).lower()
+                            for kw in ("websocket", "/ws", "socket", "cable", "signalr"))]
+
+            _ws_scan_status = "running 9 security tests"
+            results = scanner.scan(extra_urls=extra)
+            with _engine_lock:
+                _ws_scan_findings.extend(results)
+            _ws_scan_status = f"complete — {len(results)} findings"
+        except Exception as e:
+            _ws_scan_status = f"error: {e}"
+        finally:
+            _ws_scan_running = False
+
+    threading.Thread(target=_ws_worker, args=(target,), daemon=True).start()
+    return jsonify({"success": True, "target": target})
+
+
+@app.route("/api/engine/websocket/stop", methods=["POST"])
+def ws_scan_stop():
+    _ws_scan_stop.set()
+    return jsonify({"success": True})
+
+
+@app.route("/api/engine/websocket/status")
+def ws_scan_status():
+    return jsonify({
+        "running":  _ws_scan_running,
+        "status":   _ws_scan_status,
+        "findings": len(_ws_scan_findings),
+    })
+
+
+@app.route("/api/engine/websocket/results")
+def ws_scan_results():
+    with _engine_lock:
+        results = list(_ws_scan_findings)
+    return jsonify({"results": results, "count": len(results), "running": _ws_scan_running})
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -3622,12 +4396,480 @@ def oast_clear():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ██  AJAX SPIDER ROUTES
+# ██  ADVANCED CRAWLER — Playwright AJAX + Katana + Wayback (unified, deduped)
 # ═══════════════════════════════════════════════════════════════════════════════
+
+def _fetch_seed_urls(target: str, stop_event: threading.Event) -> list:
+    """Fetch robots.txt and sitemap.xml from target, return seed URL entries.
+
+    Parses:
+      - robots.txt  → Disallow/Allow paths (attack surface hints) + Sitemap: directives
+      - sitemap.xml → all <loc> URLs (regular sitemap + sitemap index recursion)
+
+    Returns list of {url, source='robots'|'sitemap', status=0, content_type='', title=''}
+    """
+    from urllib.parse import urljoin, urlparse as _up
+    import urllib.request as _ur
+    import re as _re
+
+    parsed      = _up(target)
+    base_origin = f"{parsed.scheme}://{parsed.netloc}"
+    seed:  list = []
+    seen_u: set = set()
+    seen_sm: set = set()
+
+    def _fetch(url: str, timeout: int = 6) -> str:
+        try:
+            req = _ur.Request(url, headers={"User-Agent": "DAST-SeedFetcher/1.0"})
+            with _ur.urlopen(req, timeout=timeout) as resp:
+                return resp.read().decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+
+    def _add(url: str, source: str):
+        url = url.strip()
+        if url and url not in seen_u:
+            seen_u.add(url)
+            seed.append({"url": url, "source": source, "status": 0,
+                         "content_type": "", "title": ""})
+
+    def _parse_sitemap(url: str, depth: int = 0):
+        if depth > 4 or url in seen_sm or stop_event.is_set():
+            return
+        seen_sm.add(url)
+        content = _fetch(url)
+        if not content:
+            return
+        # Sitemap index: recurse into child sitemaps
+        for loc in _re.findall(r"<sitemap>.*?<loc>(.*?)</loc>.*?</sitemap>",
+                                content, _re.DOTALL):
+            if not stop_event.is_set():
+                _parse_sitemap(loc.strip(), depth + 1)
+        # Regular sitemap: <url><loc>...</loc></url>
+        for loc in _re.findall(r"<url>.*?<loc>(.*?)</loc>.*?</url>",
+                                content, _re.DOTALL):
+            if stop_event.is_set():
+                break
+            _add(loc.strip(), "sitemap")
+
+    # ── robots.txt ────────────────────────────────────────────────────────────
+    robots_content = _fetch(f"{base_origin}/robots.txt")
+    if robots_content and not stop_event.is_set():
+        for line in robots_content.splitlines():
+            line = line.strip()
+            if stop_event.is_set():
+                break
+            if line.lower().startswith("sitemap:"):
+                sitemap_url = line.split(":", 1)[1].strip()
+                if sitemap_url:
+                    _parse_sitemap(sitemap_url)
+            elif line.lower().startswith(("disallow:", "allow:")):
+                path = line.split(":", 1)[1].strip()
+                # Skip wildcards and trivial entries
+                if path and path not in ("/", "") and "*" not in path:
+                    full_url = urljoin(base_origin + "/", path.lstrip("/"))
+                    _add(full_url, "robots")
+
+    # ── sitemap.xml (if no Sitemap: directive was found in robots.txt) ────────
+    if not seen_sm and not stop_event.is_set():
+        _parse_sitemap(f"{base_origin}/sitemap.xml")
+
+    return seed
+
+
+def _run_graphql_introspection(target: str, stop_event: threading.Event,
+                                discovered_urls: list) -> list:
+    """Try GraphQL introspection on known + common GraphQL endpoints.
+
+    `discovered_urls` — list of URL strings already found by other crawlers,
+    used to detect /graphql paths that are definitely alive.
+
+    Returns list of {url, source='graphql', status, content_type, title}
+    """
+    try:
+        import requests as _r
+        import urllib3 as _u3
+        _u3.disable_warnings(_u3.exceptions.InsecureRequestWarning)
+    except ImportError:
+        return []
+
+    from urllib.parse import urlparse as _up
+
+    parsed      = _up(target)
+    base_origin = f"{parsed.scheme}://{parsed.netloc}"
+
+    # Well-known GraphQL paths + anything already discovered that looks like GraphQL
+    gql_paths = {"/graphql", "/api/graphql", "/query", "/gql",
+                 "/graphiql", "/v1/graphql", "/v2/graphql", "/api/query"}
+    for u in discovered_urls:
+        p = _up(u).path.lower()
+        if "graphql" in p or "/gql" in p or "/query" in p:
+            gql_paths.add(_up(u).path)
+
+    introspection_q = {"query": "{ __schema { queryType { name } types { name kind fields { name } } } }"}
+    results = []
+
+    for path in gql_paths:
+        if stop_event.is_set():
+            break
+        url = base_origin + path
+        try:
+            resp = _r.post(
+                url,
+                json    = introspection_q,
+                timeout = 5,
+                verify  = False,
+                headers = {"Content-Type": "application/json",
+                           "User-Agent": "DAST-GraphQL/1.0"},
+            )
+            if resp.status_code == 200:
+                try:
+                    data   = resp.json()
+                    schema = (data.get("data") or {}).get("__schema")
+                    if schema:
+                        types = [t["name"] for t in (schema.get("types") or [])
+                                 if t.get("name") and not t["name"].startswith("__")]
+                        results.append({
+                            "url":          url,
+                            "source":       "graphql",
+                            "status":       200,
+                            "content_type": "application/json",
+                            "title":        f"[GraphQL] {len(types)} types",
+                        })
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    return results
+
+
+def _run_wayback(target: str, stop_event: threading.Event, limit: int = 5000):
+    """Fetch all historical URLs for target from Wayback Machine CDX API.
+
+    Returns list of raw URL strings (unprobed — call _probe_liveness next).
+    """
+    from urllib.parse import urlparse as _up
+    import urllib.request as _ur
+    import urllib.parse as _uparse
+
+    parsed   = _up(target)
+    domain   = parsed.netloc or parsed.path   # handle bare domain input
+    # Strip port for CDX query (archive.org indexes by hostname only)
+    host     = domain.split(":")[0]
+
+    cdx_url  = (
+        "https://web.archive.org/cdx/search/cdx"
+        f"?url={_uparse.quote(host)}/*"
+        "&output=json"
+        "&fl=original"
+        "&collapse=urlkey"
+        f"&limit={limit}"
+    )
+
+    raw_urls: list = []
+    try:
+        req  = _ur.Request(cdx_url, headers={"User-Agent": "DAST-WaybackHarvester/1.0"})
+        with _ur.urlopen(req, timeout=20) as resp:
+            if stop_event.is_set():
+                return []
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+            # First row is the header ["original"], skip it
+            for row in data[1:]:
+                if stop_event.is_set():
+                    break
+                if row and row[0]:
+                    url = row[0].strip()
+                    # Keep only same-host HTTP/HTTPS URLs
+                    try:
+                        p = _up(url)
+                        if p.scheme in ("http", "https") and host in p.netloc:
+                            raw_urls.append(url)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+    return raw_urls
+
+
+def _probe_liveness(urls, stop_event, timeout: int = 5):
+    """Probe a list of URLs for liveness using httpx binary or requests fallback.
+
+    Returns list of {url, status, content_type, source='wayback'} for live URLs (2xx/3xx).
+    Dead URLs (404, 5xx, timeout) are silently dropped.
+    """
+    if not urls:
+        return []
+
+    live: list = []
+
+    # ── Path 1: httpx binary (fastest — concurrent Go HTTP client) ────────────
+    if _HTTPX_AVAILABLE and not stop_event.is_set():
+        import tempfile, os
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tf:
+            tf.write("\n".join(urls))
+            tf_path = tf.name
+        try:
+            cmd = [
+                "httpx",
+                "-l", tf_path,
+                "-silent",
+                "-sc",           # status code
+                "-ct",           # content-type
+                "-timeout", str(timeout),
+                "-threads", "25",
+                "-json",
+                "-no-color",
+            ]
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            for line in proc.stdout:  # type: ignore[union-attr]
+                if stop_event.is_set():
+                    proc.terminate()
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj    = json.loads(line)
+                    status = obj.get("status-code", 0) or obj.get("status_code", 0)
+                    if 200 <= status < 400:
+                        live.append({
+                            "url":          obj.get("url", ""),
+                            "status":       status,
+                            "content_type": obj.get("content-type", ""),
+                            "source":       "wayback",
+                            "title":        obj.get("title", ""),
+                        })
+                except (json.JSONDecodeError, KeyError):
+                    pass
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+        finally:
+            try:
+                os.unlink(tf_path)
+            except Exception:
+                pass
+        return live
+
+    # ── Path 2: requests fallback (no httpx binary) ───────────────────────────
+    import concurrent.futures
+    try:
+        import requests as _r
+        import urllib3 as _u3
+        _u3.disable_warnings(_u3.exceptions.InsecureRequestWarning)
+    except ImportError:
+        return []
+
+    def _check(url):
+        if stop_event.is_set():
+            return None
+        try:
+            resp = _r.head(
+                url,
+                timeout    = timeout,
+                verify     = False,
+                allow_redirects = True,
+                headers    = {"User-Agent": "DAST-WaybackProbe/1.0"},
+            )
+            if 200 <= resp.status_code < 400:
+                return {
+                    "url":          resp.url,
+                    "status":       resp.status_code,
+                    "content_type": resp.headers.get("content-type", ""),
+                    "source":       "wayback",
+                    "title":        "",
+                }
+        except Exception:
+            pass
+        return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
+        futures = {ex.submit(_check, u): u for u in urls}
+        for fut in concurrent.futures.as_completed(futures):
+            if stop_event.is_set():
+                break
+            result = fut.result()
+            if result:
+                live.append(result)
+
+    return live
+
+
+def _run_katana(target: str, stop_event: threading.Event,
+                depth: int = 3, rate_limit: int = 10,
+                extra_headers=None,    # Optional[list[str]]
+                form_fill: bool = True,
+                concurrency: int = 10):
+    """Run katana binary as subprocess, parse JSONL output.
+
+    Full JS coverage mode:
+      -jc           JS file crawling (parse .js files for endpoints)
+      -jsl          JSLuice — advanced bundled-JS endpoint extraction
+      -aff          Automatic Form Fill — submits forms to discover POST endpoints
+      -c 10         10 parallel crawlers (vs default 1)
+      -strategy bfs Breadth-first so shallow endpoints aren't missed
+      -kf all       Capture forms, links, scripts
+
+    Returns:
+      results  — list of {url, method, source='katana', status, content_type, title}
+      surfaces — list of (endpoint, method, body, content_type) for POST InputSurface creation
+    """
+    import shutil as _sh
+    katana_bin = _sh.which("katana")
+    if not katana_bin:
+        return [], []
+
+    cmd = [
+        katana_bin,
+        "-u", target,
+        "-d", str(depth),
+        "-jc",                         # JS crawling
+        "-jsl",                        # JSLuice endpoint extraction
+        "-rl", str(rate_limit),
+        "-c", str(concurrency),        # parallel crawlers
+        "-strategy", "breadth-first",  # breadth-first → broader coverage first
+        "-timeout", "10",
+        "-silent",
+        "-jsonl",
+        "-kf", "all",                  # forms, links, scripts
+        "-no-color",
+    ]
+    if form_fill:
+        cmd.append("-aff")   # Automatic Form Fill → discovers POST endpoints
+    if extra_headers:
+        for h in extra_headers:
+            cmd += ["-H", h]
+
+    results:  list = []
+    surfaces: list = []   # (endpoint, method, body, content_type) tuples
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        for line in proc.stdout:  # type: ignore[union-attr]
+            if stop_event.is_set():
+                proc.terminate()
+                break
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj      = json.loads(line)
+                req      = obj.get("request", {})
+                resp     = obj.get("response", {})
+                endpoint = req.get("endpoint") or obj.get("endpoint", "")
+                method   = req.get("method", "GET")
+                body     = req.get("body", "") or ""
+                status   = resp.get("status_code", 0)
+                ct_resp  = resp.get("content_type", "")
+                ct_req   = req.get("headers", {}).get("content-type", "")
+
+                if endpoint:
+                    results.append({
+                        "url":          endpoint,
+                        "method":       method,
+                        "source":       "katana",
+                        "status":       status,
+                        "content_type": ct_resp,
+                        "title":        "",
+                    })
+                    # Extract POST body params for InputSurface creation
+                    if method in ("POST", "PUT", "PATCH") and body:
+                        surfaces.append((endpoint, method, body, ct_req or "application/x-www-form-urlencoded"))
+            except (json.JSONDecodeError, KeyError):
+                pass
+        proc.wait(timeout=5)
+    except Exception:
+        pass
+    return results, surfaces
+
+
+def _run_katana_js_static(js_urls: list, stop_event: threading.Event) -> list:
+    """Phase 2 Katana: static analysis of already-discovered JS file URLs.
+
+    Runs katana at depth=0 (no crawling) against each .js file URL to extract
+    endpoints embedded in bundled JavaScript (webpack, rollup, etc.) without
+    re-crawling the whole site.
+
+    Returns list of {url, method, source='katana', status=0, content_type='', title}
+    """
+    import shutil as _sh
+    katana_bin = _sh.which("katana")
+    if not katana_bin or not js_urls:
+        return []
+
+    results: list = []
+
+    for js_url in js_urls[:100]:          # cap at 100 JS files
+        if stop_event.is_set():
+            break
+        # Skip non-JS or data URIs
+        path_lower = js_url.lower().split("?")[0]
+        if not (path_lower.endswith(".js") or path_lower.endswith(".mjs")
+                or path_lower.endswith(".ts") or "/js/" in path_lower):
+            continue
+
+        cmd = [
+            katana_bin,
+            "-u", js_url,
+            "-d", "0",          # depth 0 — analyse this file only, don't follow links
+            "-jc",              # parse JS
+            "-jsl",             # JSLuice endpoint extraction
+            "-timeout", "8",
+            "-silent",
+            "-jsonl",
+            "-no-color",
+        ]
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            fname = js_url.rstrip("/").split("/")[-1].split("?")[0][:30]
+            for line in proc.stdout:  # type: ignore[union-attr]
+                if stop_event.is_set():
+                    proc.terminate()
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj      = json.loads(line)
+                    endpoint = obj.get("request", {}).get("endpoint") or obj.get("endpoint", "")
+                    if endpoint:
+                        results.append({
+                            "url":          endpoint,
+                            "method":       obj.get("request", {}).get("method", "GET"),
+                            "source":       "katana",
+                            "status":       0,
+                            "content_type": "",
+                            "title":        f"[JS:{fname}]",
+                        })
+                except (json.JSONDecodeError, KeyError):
+                    pass
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+
+    return results
+
 
 @app.route("/api/engine/ajax-crawl", methods=["POST"])
 def ajax_crawl_start():
-    """Start Ajax Spider (requires Playwright). Body: {target, max_pages, max_depth}"""
+    """Start Advanced Crawler (Playwright AJAX + Katana). Body: {target, max_pages, max_depth}"""
     global _ajax_running, _ajax_stop_event, _ajax_thread
 
     if not _AJAX_SPIDER_AVAILABLE:
@@ -3645,51 +4887,290 @@ def ajax_crawl_start():
     if not target:
         return jsonify({"error": "target required"}), 400
 
+    # Auto-resolve scheme/port (http→https, alt-port detection)
+    target = _resolve_target(target)
+
     _ajax_stop_event = threading.Event()
     _ajax_running    = True
 
     def _ajax_worker():
-        global _ajax_running
-        try:
-            scope   = ScopeManager(target)
-            cookies = []
-            if _engine_auth_handler:
-                cookies = [
-                    {"name": c.name, "value": c.value,
-                     "domain": urlparse(target).netloc, "path": "/"}
-                    for c in _engine_auth_handler.session.cookies
-                ]
-            spider = AjaxSpider(
-                target     = target,
-                scope      = scope,
-                max_pages  = data.get("max_pages", 50),
-                max_depth  = data.get("max_depth", 3),
-                headless   = data.get("headless", True),
-                cookies    = cookies,
-                stop_event = _ajax_stop_event,
-                callback   = lambda u, s: None,
-            )
-            ajax_sitemap = spider.crawl()
-            # Merge into main sitemap
-            with _engine_lock:
-                if _engine_sitemap is not None:
-                    for page_url, page_info in ajax_sitemap.pages.items():
-                        _engine_sitemap.add_page(
-                            page_info["url"], page_info["status"],
-                            page_info["content_type"], page_info.get("headers", {}),
-                            page_info.get("title", "")
-                        )
-                    for surf in ajax_sitemap.surfaces:
-                        _engine_sitemap.add_surface(surf)
-        except Exception:
-            pass
-        finally:
-            with _engine_lock:
-                _ajax_running = False
+        """Unified Advanced Crawler — 5 parallel sources, shared dedup store.
 
-    _ajax_thread = threading.Thread(target=_ajax_worker, daemon=True, name="dast-ajax-spider")
+        Sources:
+          1. Playwright AJAX spider (multi-tab, with WebSocket capture)
+          2. Katana static JS analysis subprocess
+          3. Wayback Machine CDX harvest + httpx liveness probe
+          4. robots.txt / sitemap.xml seed URLs
+          5. GraphQL introspection (runs after crawlers finish)
+
+        Pre-seeds from traditional spider (_engine_sitemap) if already run.
+        """
+        global _ajax_running, _ajax_urls_found, _ajax_pages
+
+        # Shared dedup state — all crawlers write here under _merge_lock
+        _seen_urls: set  = set()
+        _all_pages: list = []
+        _merge_lock      = threading.Lock()
+
+        def _add_pages(entries):
+            """Merge new URL entries, skip duplicates by URL."""
+            with _merge_lock:
+                for e in entries:
+                    url = (e.get("url") or "").strip()
+                    if url and url not in _seen_urls:
+                        _seen_urls.add(url)
+                        _all_pages.append(e)
+
+        # ── Pre-seed from Traditional Spider results (if already run) ─────────
+        with _engine_lock:
+            if _engine_sitemap is not None and _engine_sitemap.pages:
+                for page_url, page_info in _engine_sitemap.pages.items():
+                    ct  = page_info.get("content_type", "")
+                    _add_pages([{
+                        "url":          page_url,
+                        "status":       page_info.get("status", 0),
+                        "content_type": ct,
+                        "source":       "traditional",
+                        "title":        page_info.get("title", ""),
+                    }])
+
+        # ── Thread 1: Playwright AJAX spider (multi-tab + WebSocket) ──────────
+        playwright_result = []
+
+        def _run_playwright():
+            try:
+                scope   = ScopeManager(target)
+                cookies = []
+                if _engine_auth_handler:
+                    cookies = [
+                        {"name": c.name, "value": c.value,
+                         "domain": urlparse(target).netloc, "path": "/"}
+                        for c in _engine_auth_handler.session.cookies
+                    ]
+                spider = AjaxSpider(
+                    target      = target,
+                    scope       = scope,
+                    max_pages   = data.get("max_pages", 50),
+                    max_depth   = data.get("max_depth", 3),
+                    headless    = data.get("headless", True),
+                    cookies     = cookies,
+                    stop_event  = _ajax_stop_event,
+                    callback    = lambda u, s: None,
+                    max_tabs    = 3,
+                    # Sprint 3: pass login config for session refresh + form fill
+                    auth_config = _login_config if _login_config.get("login_url") else {},
+                    smart_fill  = True,
+                )
+                ajax_sitemap = spider.crawl()
+
+                pages = []
+                for page_url, page_info in ajax_sitemap.pages.items():
+                    ct  = page_info.get("content_type", "")
+                    if ct == "websocket":
+                        src = "websocket"
+                    elif ct == "xhr/network":
+                        src = "network"
+                    else:
+                        src = "browser"
+                    pages.append({
+                        "url":          page_url,
+                        "status":       page_info.get("status", 0),
+                        "content_type": ct,
+                        "source":       src,
+                        "title":        page_info.get("title", ""),
+                    })
+
+                playwright_result.extend(pages)
+                _add_pages(pages)
+
+                # Merge into engine sitemap if a full scan has already run
+                with _engine_lock:
+                    if _engine_sitemap is not None:
+                        for page_url, page_info in ajax_sitemap.pages.items():
+                            _engine_sitemap.add_page(
+                                page_info["url"], page_info["status"],
+                                page_info["content_type"], page_info.get("headers", {}),
+                                page_info.get("title", "")
+                            )
+                        for surf in ajax_sitemap.surfaces:
+                            _engine_sitemap.add_surface(surf)
+            except Exception:
+                pass
+
+        # ── Thread 2: Katana subprocess (full JS coverage) ────────────────────
+        katana_result   = []
+        katana_surfaces = []   # (endpoint, method, body, content_type) for InputSurface
+
+        def _run_katana_thread():
+            if not _KATANA_AVAILABLE:
+                return
+            extra_headers = []
+            if _engine_auth_handler:
+                try:
+                    cookie_str = "; ".join(
+                        f"{c.name}={c.value}"
+                        for c in _engine_auth_handler.session.cookies
+                    )
+                    if cookie_str:
+                        extra_headers.append(f"Cookie: {cookie_str}")
+                except Exception:
+                    pass
+
+            entries, surfs = _run_katana(
+                target,
+                _ajax_stop_event,
+                depth         = data.get("max_depth", 3),
+                rate_limit    = 10,
+                extra_headers = extra_headers if extra_headers else None,
+                form_fill     = True,
+                concurrency   = 10,
+            )
+            katana_result.extend(entries)
+            katana_surfaces.extend(surfs)
+            _add_pages(entries)
+
+        # ── Thread 3: Wayback Machine harvest + liveness probe ───────────────
+        wayback_result = []
+
+        def _run_wayback_thread():
+            raw_urls = _run_wayback(target, _ajax_stop_event)
+            if not raw_urls or _ajax_stop_event.is_set():
+                return
+            with _merge_lock:
+                unknown = [u for u in raw_urls if u not in _seen_urls]
+            if not unknown or _ajax_stop_event.is_set():
+                return
+            live = _probe_liveness(unknown, _ajax_stop_event)
+            wayback_result.extend(live)
+            _add_pages(live)
+
+        # ── Thread 4: robots.txt + sitemap.xml seed ───────────────────────────
+        sitemap_result = []
+
+        def _run_sitemap_thread():
+            entries = _fetch_seed_urls(target, _ajax_stop_event)
+            if not entries or _ajax_stop_event.is_set():
+                return
+            # Only keep URLs not already known
+            new_entries = [e for e in entries if (e.get("url") or "") not in _seen_urls]
+            sitemap_result.extend(new_entries)
+            _add_pages(new_entries)
+
+        # ── Run all four crawlers in parallel ─────────────────────────────────
+        t_pw = threading.Thread(target=_run_playwright,    daemon=True, name="adv-crawler-playwright")
+        t_kt = threading.Thread(target=_run_katana_thread, daemon=True, name="adv-crawler-katana")
+        t_wb = threading.Thread(target=_run_wayback_thread, daemon=True, name="adv-crawler-wayback")
+        t_sm = threading.Thread(target=_run_sitemap_thread, daemon=True, name="adv-crawler-sitemap")
+        t_pw.start(); t_kt.start(); t_wb.start(); t_sm.start()
+        t_pw.join();  t_kt.join();  t_wb.join();  t_sm.join()
+
+        # ── Post-crawl Phase A: Katana POST body → InputSurface objects ────────
+        # Katana's -aff flag submits forms; the POST bodies reveal real params.
+        # Convert those into InputSurface objects so the fuzzer can attack them.
+        if katana_surfaces and not _ajax_stop_event.is_set():
+            from urllib.parse import parse_qs as _pqs
+            try:
+                from modules.crawler import InputSurface as _IS
+                with _engine_lock:
+                    if _engine_sitemap is not None:
+                        for ep, method, body, ct in katana_surfaces:
+                            if "json" in ct:
+                                try:
+                                    body_obj = json.loads(body)
+                                    if isinstance(body_obj, dict):
+                                        for k, v in list(body_obj.items())[:20]:
+                                            _engine_sitemap.add_surface(_IS(
+                                                url=ep, method=method, param=k,
+                                                param_type="json", original_value=str(v),
+                                                content_type="application/json",
+                                            ))
+                                except Exception:
+                                    pass
+                            else:
+                                for pair in body.split("&"):
+                                    if "=" in pair:
+                                        k, _, v = pair.partition("=")
+                                        if k:
+                                            _engine_sitemap.add_surface(_IS(
+                                                url=ep, method=method, param=k,
+                                                param_type="form", original_value=v,
+                                                content_type=ct or "application/x-www-form-urlencoded",
+                                            ))
+            except Exception:
+                pass
+
+        # ── Post-crawl Phase B: Katana static JS analysis ─────────────────────
+        # Extract .js URLs from all crawlers → run Katana depth-0 against each.
+        # Finds endpoints buried in webpack bundles without re-crawling the site.
+        if _KATANA_AVAILABLE and not _ajax_stop_event.is_set():
+            with _merge_lock:
+                js_urls = [
+                    p.get("url", "") for p in _all_pages
+                    if p.get("url", "").lower().split("?")[0].endswith((".js", ".mjs"))
+                    or "/js/" in p.get("url", "").lower()
+                ]
+            if js_urls:
+                js_static_entries = _run_katana_js_static(js_urls, _ajax_stop_event)
+                if js_static_entries:
+                    _add_pages(js_static_entries)
+                    _log_activity("katana_js_static", target,
+                                  f"JS static: {len(js_static_entries)} endpoints from {len(js_urls)} JS files")
+
+        # ── Post-crawl Phase C: GraphQL introspection ─────────────────────────
+        if not _ajax_stop_event.is_set():
+            with _merge_lock:
+                discovered = [p.get("url", "") for p in _all_pages]
+            gql_entries = _run_graphql_introspection(target, _ajax_stop_event, discovered)
+            if gql_entries:
+                _add_pages(gql_entries)
+                for e in gql_entries:
+                    _log_activity("graphql_found", e["url"], e.get("title", ""))
+
+        # ── Persist merged results ────────────────────────────────────────────
+        with _engine_lock:
+            _ajax_pages      = list(_all_pages)
+            _ajax_urls_found = len(_all_pages)
+
+        # Build summary breakdown for activity log
+        n_browser     = sum(1 for p in _all_pages if p.get("source") == "browser")
+        n_network     = sum(1 for p in _all_pages if p.get("source") == "network")
+        n_websocket   = sum(1 for p in _all_pages if p.get("source") == "websocket")
+        n_katana      = sum(1 for p in _all_pages if p.get("source") == "katana")
+        n_wayback     = sum(1 for p in _all_pages if p.get("source") == "wayback")
+        n_sitemap     = sum(1 for p in _all_pages if p.get("source") in ("sitemap", "robots"))
+        n_traditional = sum(1 for p in _all_pages if p.get("source") == "traditional")
+        n_graphql     = sum(1 for p in _all_pages if p.get("source") == "graphql")
+        n_form_submit = sum(1 for p in _all_pages if p.get("source") == "form_submit")
+        detail = f"{len(_all_pages)} URLs total"
+        parts  = []
+        if n_browser + n_network + n_websocket:
+            pw_count = n_browser + n_network + n_websocket
+            parts.append(f"Playwright: {pw_count}")
+        if n_katana:      parts.append(f"Katana: {n_katana}")
+        if n_wayback:     parts.append(f"Wayback: {n_wayback}")
+        if n_sitemap:     parts.append(f"Sitemap: {n_sitemap}")
+        if n_traditional: parts.append(f"Traditional: {n_traditional}")
+        if n_graphql:     parts.append(f"GraphQL: {n_graphql}")
+        if n_form_submit: parts.append(f"Form-Submit: {n_form_submit}")
+        if parts:         detail += f" ({', '.join(parts)})"
+
+        with _engine_lock:
+            _ajax_running = False
+        _log_activity("ajax_done", target, detail)
+
+    sources = ["Playwright (3-tab)", "Sitemap", "Wayback"]
+    if _KATANA_AVAILABLE:
+        sources.append("Katana")
+    _log_activity("ajax_start", target, f"Starting: {', '.join(sources)}")
+    _ajax_thread = threading.Thread(target=_ajax_worker, daemon=True, name="dast-adv-crawler")
     _ajax_thread.start()
-    return jsonify({"success": True, "target": target, "playwright": True})
+    return jsonify({"success": True, "target": target,
+                    "playwright": _AJAX_SPIDER_AVAILABLE,
+                    "katana":     _KATANA_AVAILABLE,
+                    "wayback":    True,
+                    "sitemap":    True,
+                    "graphql":    True,
+                    "httpx":      _HTTPX_AVAILABLE})
 
 
 @app.route("/api/engine/ajax-crawl/stop", methods=["POST"])
@@ -3701,14 +5182,128 @@ def ajax_crawl_stop():
 @app.route("/api/engine/ajax-crawl/status")
 def ajax_crawl_status():
     with _engine_lock:
-        running = _ajax_running
+        running    = _ajax_running
+        urls_found = _ajax_urls_found
+        pages      = list(_ajax_pages)
+
+    # Per-source breakdown
+    breakdown = {
+        "browser":      sum(1 for p in pages if p.get("source") == "browser"),
+        "network":      sum(1 for p in pages if p.get("source") == "network"),
+        "websocket":    sum(1 for p in pages if p.get("source") == "websocket"),
+        "katana":       sum(1 for p in pages if p.get("source") == "katana"),
+        "wayback":      sum(1 for p in pages if p.get("source") == "wayback"),
+        "sitemap":      sum(1 for p in pages if p.get("source") in ("sitemap", "robots")),
+        "traditional":  sum(1 for p in pages if p.get("source") == "traditional"),
+        "graphql":      sum(1 for p in pages if p.get("source") == "graphql"),
+        "form_submit":  sum(1 for p in pages if p.get("source") == "form_submit"),
+    }
     return jsonify({
-        "running":             running,
+        "running":              running,
+        "urls_found":           urls_found,
         "playwright_available": _AJAX_SPIDER_AVAILABLE,
+        "katana_available":     _KATANA_AVAILABLE,
+        "httpx_available":      _HTTPX_AVAILABLE,
+        "breakdown":            breakdown,
     })
 
 
+@app.route("/api/engine/ajax-crawl/results")
+def ajax_crawl_results():
+    """Return all URLs discovered by the last AJAX crawl."""
+    with _engine_lock:
+        pages = list(_ajax_pages)
+    return jsonify({"urls": pages, "count": len(pages)})
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
+# ██  TARGET PROBE  (auto-discover working port/scheme)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _probe_target(target: str) -> dict:
+    """Check if target responds with a useful page; auto-corrects scheme/port.
+
+    Detection order:
+      1. Try target as-is.
+      2. If HTTP 400 (server rejected plain HTTP), try https:// on same host:port.
+      3. If connection failed entirely, probe common alt ports.
+    Returns the best resolved URL and whether a correction was made.
+    """
+    import requests as _r
+    from urllib.parse import urlparse as _up
+    _s = _r.Session(); _s.verify = False
+    _headers = {"User-Agent": "Mozilla/5.0 (DAST-Probe/1.0)", "Connection": "close"}
+
+    _p    = _up(target)
+    _host = _p.hostname or target
+    _port = _p.port  # may be None
+    _scheme = _p.scheme or "http"
+
+    def _try(url: str) -> "_r.Response | None":
+        try:
+            return _s.get(url, timeout=5, headers=_headers, allow_redirects=True)
+        except Exception:
+            return None
+
+    # 1. Try as-is
+    _resp = _try(target)
+    if _resp is not None:
+        # HTTP 400 on a TLS port usually means wrong scheme → try https same host:port
+        if _resp.status_code == 400 and _scheme == "http":
+            _https = f"https://{_host}" + (f":{_port}" if _port else "")
+            _r2 = _try(_https)
+            if _r2 is not None and _r2.status_code != 400:
+                return {"reachable": True, "original": target, "resolved": _https,
+                        "status": _r2.status_code, "port_changed": True,
+                        "note": "Switched http→https (server rejected plain HTTP)"}
+        return {"reachable": True, "original": target, "resolved": target,
+                "status": _resp.status_code, "port_changed": False}
+
+    # 2. Connection failed — try https same port first (if currently http)
+    if _scheme == "http" and _port:
+        _https = f"https://{_host}:{_port}"
+        _r2 = _try(_https)
+        if _r2 is not None:
+            return {"reachable": True, "original": target, "resolved": _https,
+                    "status": _r2.status_code, "port_changed": True,
+                    "note": "Switched http→https on same port"}
+
+    # 3. Probe alt ports
+    for _aport in [8443, 8080, 443, 8000, 3000, 9090, 9000, 5000, 4848]:
+        if _aport == _port:
+            continue
+        _alt_scheme = "https" if _aport in (443, 8443) else _scheme
+        _alt = f"{_alt_scheme}://{_host}:{_aport}"
+        _r2 = _try(_alt)
+        if _r2 is not None:
+            return {"reachable": True, "original": target, "resolved": _alt,
+                    "status": _r2.status_code, "port_changed": True}
+    return {"reachable": False, "original": target, "resolved": target,
+            "status": None, "port_changed": False}
+
+
+def _resolve_target(target: str) -> str:
+    """Return the best reachable URL for target (auto-upgrades scheme/port).
+    Falls back to original if nothing responds — never blocks the caller.
+    """
+    try:
+        result = _probe_target(target)
+        return result.get("resolved") or target
+    except Exception:
+        return target
+
+
+@app.route("/api/probe-target", methods=["POST"])
+def probe_target_api():
+    """Probe target reachability — auto-detects correct port if default fails."""
+    data   = req.json or {}
+    target = data.get("target", "").strip()
+    if not target:
+        return jsonify({"error": "target required"}), 400
+    result = _probe_target(target)
+    return jsonify(result)
+
+
 # ██  CAPABILITY STATUS  (single endpoint for UI feature detection)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -3745,4 +5340,17 @@ def capabilities():
         "oast":            {"available": _ENGINE_AVAILABLE},
         "openapi_import":  {"available": _ENGINE_AVAILABLE, "surfaces_loaded": len(_openapi_surfaces)},
         "ajax_spider":     {"available": _AJAX_SPIDER_AVAILABLE, "running": _ajax_running},
+        "katana":          {"available": _KATANA_AVAILABLE},
+        "httpx":           {"available": _HTTPX_AVAILABLE},
+        "wayback":         {"available": True},   # always available (CDX API + requests fallback)
+        "sitemap_seed":    {"available": True},   # always available (urllib.request)
+        "graphql":         {"available": True},   # always available (introspection probe)
+        "graphql_scanner": {"available": True, "running": _graphql_scan_running,
+                            "findings": len(_graphql_scan_findings)},
+        "ws_scanner":      {"available": True, "running": _ws_scan_running,
+                            "findings": len(_ws_scan_findings)},
+        "websocket":       {"available": _AJAX_SPIDER_AVAILABLE},  # Playwright required
+        "session_refresh": {"available": _AJAX_SPIDER_AVAILABLE,    # Sprint 3.1
+                            "configured": bool(_login_config.get("login_url"))},
+        "smart_form_fill": {"available": _AJAX_SPIDER_AVAILABLE},   # Sprint 3.2
     })

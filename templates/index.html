@@ -553,6 +553,123 @@ select.field-mini { cursor: pointer; }
 /* ── Reports section ─────────────────────────────────────────────────────── */
 #section-reports { padding: 16px; overflow-y: auto; }
 .reports-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+
+/* ── ScrollProgress component (ported from scroll-progress-1.tsx) ──────── */
+.sp-bar {
+  position: fixed; z-index: 9999;
+  left: 0; right: 0;
+  transform-origin: left;
+  transform: scaleX(0);
+  will-change: transform;
+  pointer-events: none;
+}
+.sp-top    { top: 0; }
+.sp-bottom { bottom: 0; }
+/* size variants (Tailwind h-0.5 → h-4) */
+.sp-xs  { height: 2px; }
+.sp-sm  { height: 4px; }
+.sp-md  { height: 6px; }
+.sp-lg  { height: 8px; }
+.sp-xl  { height: 12px; }
+.sp-2xl { height: 16px; }
+/* rounded variants */
+.sp-rounded-sm   { border-radius: 2px; }
+.sp-rounded      { border-radius: 4px; }
+.sp-rounded-lg   { border-radius: 8px; }
+.sp-rounded-full { border-radius: 9999px; }
+/* glow variants */
+.sp-glow-sm { filter: drop-shadow(0 1px 3px currentColor); }
+.sp-glow    { filter: drop-shadow(0 2px 6px currentColor); }
+.sp-glow-lg { filter: drop-shadow(0 3px 12px currentColor) drop-shadow(0 1px 4px currentColor); }
+.sp-glow-xl { filter: drop-shadow(0 5px 20px currentColor) drop-shadow(0 2px 8px currentColor); }
+/* gradient variants */
+.sp-default    { background: linear-gradient(to right,#3b82f6,#a855f7,#ec4899); }
+.sp-rainbow    { background: linear-gradient(to right,#ef4444,#f59e0b,#22c55e,#3b82f6,#a855f7); }
+.sp-ocean      { background: linear-gradient(to right,#22d3ee,#3b82f6,#2563eb); }
+.sp-sunset     { background: linear-gradient(to right,#fb923c,#ef4444,#ec4899); }
+.sp-forest     { background: linear-gradient(to right,#4ade80,#10b981,#14b8a6); }
+.sp-monochrome { background: linear-gradient(to right,#4b5563,#1f2937,#000); }
+.sp-neon       { background: linear-gradient(to right,#ec4899,#a855f7,#6366f1); }
+.sp-fire       { background: linear-gradient(to right,#facc15,#f97316,#dc2626); }
+.sp-ice        { background: linear-gradient(to right,#bfdbfe,#67e8f9,#93c5fd); }
+.sp-gold       { background: linear-gradient(to right,#fde047,#eab308,#ca8a04); }
+.sp-solid      { background: #3b82f6; }
+/* percentage badge */
+.sp-pct {
+  position: fixed; z-index: 10000;
+  font-size: 10px; font-weight: 600;
+  background: rgba(0,0,0,0.72);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  color: var(--fg); padding: 3px 7px; border-radius: 4px;
+  opacity: 0; pointer-events: none;
+  transition: opacity .2s;
+  font-family: var(--font);
+}
+.sp-pct-visible { opacity: 1 !important; }
+.sp-pct.sp-top    { top: 10px; }
+.sp-pct.sp-bottom { bottom: 10px; }
+.sp-pct.sp-left   { left: 16px; }
+.sp-pct.sp-right  { right: 16px; }
+.sp-pct.sp-center { left: 50%; transform: translateX(-50%); }
+
+/* ── ScrollArea component (ported from shadcn/ui) ── */
+.scroll-area-wrap { margin-top: 20px; }
+.scroll-area-label {
+  font-size: 11px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .06em; color: var(--fg2); margin-bottom: 10px;
+}
+.scroll-area {
+  position: relative;
+  height: 288px;          /* h-72 */
+  width: 192px;           /* w-48 */
+  overflow: hidden;
+  border-radius: 6px;     /* rounded-md */
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+.scroll-area-viewport {
+  height: 100%; width: 100%;
+  overflow-y: auto;
+  border-radius: inherit;
+  padding: 16px;
+  scrollbar-width: none;   /* Firefox — hide native, show custom */
+  -ms-overflow-style: none;
+}
+.scroll-area-viewport::-webkit-scrollbar { display: none; }
+
+/* Custom scrollbar track + thumb */
+.scroll-area-scrollbar {
+  position: absolute; right: 0; top: 0; bottom: 0;
+  width: 10px;
+  display: flex;
+  touch-action: none;
+  user-select: none;
+  transition: background .15s;
+  padding: 1px;
+  border-left: 1px solid transparent;
+}
+.scroll-area-thumb {
+  position: relative;
+  flex: 1;
+  border-radius: 9999px;
+  background: var(--border2);
+  cursor: pointer;
+  min-height: 20px;
+}
+.scroll-area-thumb:hover { background: var(--border3); }
+
+.scroll-area-heading {
+  margin-bottom: 16px;
+  font-size: 13px; line-height: 1; font-weight: 600; color: var(--fg);
+}
+.scroll-area-item { font-size: 13px; color: var(--fg2); padding: 2px 0; }
+.scroll-area-sep {
+  margin: 8px 0;
+  height: 1px; width: 100%;
+  background: var(--border);
+  flex-shrink: 0;
+}
 .report-card {
   background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--radius2); padding: 18px 16px;
@@ -645,6 +762,12 @@ select.field-mini { cursor: pointer; }
 </head>
 <body>
 
+<!-- ScrollProgress bars (ported from scroll-progress-1.tsx) -->
+<!-- Top bar: rainbow, default size -->
+<div id="sp-top" class="sp-bar sp-top sp-md sp-rainbow sp-rounded-full"></div>
+<!-- Percentage badge: top-right -->
+<div id="sp-pct-top" class="sp-pct sp-top sp-right"></div>
+
 <div id="app">
 
   <!-- ═══════════════ SIDEBAR ═══════════════ -->
@@ -702,6 +825,7 @@ select.field-mini { cursor: pointer; }
         <span id="badge-find-txt">0</span> findings
       </span>
 
+      <button class="btn-ghost btn-sm" id="btn-probe" onclick="probeTarget()" title="Auto-detect target port">⚡ Probe</button>
       <button class="btn-scan" id="btn-launch" onclick="scanLaunch()">▶ Scan</button>
       <button class="btn-stop btn-sm" id="btn-stop" onclick="scanStop()" style="display:none">■ Stop</button>
     </div>
@@ -928,19 +1052,42 @@ select.field-mini { cursor: pointer; }
           </div>
         </div>
 
-        <!-- AJAX Spider -->
+        <!-- Advanced Crawler (Playwright + Katana unified) -->
         <div class="engine-block">
           <div class="engine-block-header">
-            <div class="engine-block-title">🕷 AJAX Spider</div>
+            <div class="engine-block-title">🕷 Advanced Crawler</div>
             <div class="flex-row">
               <button class="btn-ghost btn-xs" id="btn-ajax" onclick="runAjaxCrawl()">▶ Start</button>
+              <button class="btn-ghost btn-xs" onclick="exportAjaxUrls()" title="Export URL list">⬇ Export</button>
             </div>
           </div>
           <div class="engine-block-body">
+            <div class="flex-row" style="gap:6px;margin-bottom:6px;flex-wrap:wrap;">
+              <span id="adv-badge-playwright" style="font-size:10px;padding:2px 7px;border-radius:3px;background:#21262d;color:#7d8590;">Playwright ···</span>
+              <span id="adv-badge-katana"     style="font-size:10px;padding:2px 7px;border-radius:3px;background:#21262d;color:#7d8590;">Katana ···</span>
+              <span id="adv-badge-wayback"    style="font-size:10px;padding:2px 7px;border-radius:3px;background:#21262d;color:#7d8590;">Wayback ···</span>
+              <span id="adv-badge-httpx"      style="font-size:10px;padding:2px 7px;border-radius:3px;background:#21262d;color:#7d8590;">httpx ···</span>
+              <span id="adv-badge-sitemap"    style="font-size:10px;padding:2px 7px;border-radius:3px;background:#21262d;color:#7d8590;">Sitemap</span>
+              <span id="adv-badge-graphql"    style="font-size:10px;padding:2px 7px;border-radius:3px;background:#21262d;color:#7d8590;">GraphQL</span>
+              <span id="adv-badge-form"       style="font-size:10px;padding:2px 7px;border-radius:3px;background:#21262d;color:#7d8590;">SmartForm</span>
+              <span id="adv-breakdown" style="font-size:10px;color:#7d8590;margin-left:4px;"></span>
+            </div>
             <div class="run-bar mt-6">
               <span class="run-status" id="ajax-status">Idle — awaiting start</span>
+              <span class="run-count" id="ajax-count"></span>
             </div>
-            <div class="tool-hint" style="margin-top:10px;">Headless Chromium (Playwright) — discovers SPA routes, XHR endpoints, dynamic forms.<br/>Requires: <code>pip install playwright &amp;&amp; playwright install chromium</code></div>
+            <div class="tool-hint" style="margin-top:6px;">
+              <b>Playwright (3-tab)</b> — concurrent headless Chromium, SPA routes, XHR/fetch + WebSocket capture<br/>
+              <b>Katana</b> — static JS analysis, hidden API endpoints in bundled JS (<code>-jc -jsl</code>)<br/>
+              <b>Wayback</b> — harvests historical URLs from archive.org CDX API, then probes liveness<br/>
+              <b>Sitemap</b> — seeds from robots.txt paths and sitemap.xml <code>&lt;loc&gt;</code> entries<br/>
+              <b>GraphQL</b> — introspection probe on common GraphQL paths (<code>/graphql</code>, <code>/api/graphql</code>, …)<br/>
+              <b>Smart Form</b> — fills forms with realistic test values and submits, discovering POST-only endpoints<br/>
+              <b>Session Refresh</b> — auto-detects auth expiry (401 / login redirect) and re-authenticates mid-crawl<br/>
+              <b>httpx</b> — fast concurrent liveness prober (falls back to requests if not installed)<br/>
+              All results are merged and deduplicated automatically.
+            </div>
+            <div class="result-list" id="ajax-results-list" style="max-height:220px;overflow-y:auto;margin-top:8px;display:none;"></div>
           </div>
         </div>
 
@@ -960,6 +1107,70 @@ select.field-mini { cursor: pointer; }
               <span class="run-count" id="passive-count">0 findings</span>
             </div>
             <div class="result-list" id="passive-results-list"></div>
+          </div>
+        </div>
+
+        <!-- GraphQL Security Scanner -->
+        <div class="engine-block">
+          <div class="engine-block-header">
+            <div class="engine-block-title">🔮 GraphQL Scanner</div>
+            <div class="flex-row">
+              <button class="btn-ghost btn-xs" id="btn-gql-scan" onclick="startGraphqlScan()">▶ Scan</button>
+              <button class="btn-ghost btn-xs" id="btn-gql-stop" onclick="stopGraphqlScan()" style="display:none; color:var(--red);">■ Stop</button>
+            </div>
+          </div>
+          <div class="engine-block-body">
+            <div class="tool-hint">
+              Comprehensive GraphQL security testing — 12 test categories:<br/>
+              <b>Introspection</b>, <b>__type enumeration</b>, <b>field suggestion leak</b>,
+              <b>depth bomb</b>, <b>batch abuse</b>, <b>alias DoS</b>,
+              <b>directive overload</b>, <b>fragment abuse</b>, <b>SQL/NoSQL injection</b>,
+              <b>CSRF via GET</b>, <b>info disclosure</b>, <b>GET-based queries</b>
+            </div>
+            <div class="run-bar mt-6">
+              <span class="run-status" id="gql-status">Idle</span>
+              <span class="run-count" id="gql-count">0 findings</span>
+            </div>
+            <div class="result-list" id="gql-results-list" style="max-height:220px;overflow-y:auto;margin-top:8px;"></div>
+          </div>
+        </div>
+
+        <!-- WebSocket Security Scanner -->
+        <div class="engine-block">
+          <div class="engine-block-header">
+            <div class="engine-block-title">🔌 WebSocket Scanner</div>
+            <div class="flex-row">
+              <button class="btn-ghost btn-xs" id="btn-ws-scan" onclick="startWsScan()">▶ Scan</button>
+              <button class="btn-ghost btn-xs" id="btn-ws-stop" onclick="stopWsScan()" style="display:none; color:var(--red);">■ Stop</button>
+            </div>
+          </div>
+          <div class="engine-block-body">
+            <div class="tool-hint">
+              Comprehensive WebSocket security testing — 9 test categories:<br/>
+              <b>CSWSH</b>, <b>auth bypass</b>, <b>SQL/NoSQL injection</b>,
+              <b>XSS injection</b>, <b>message flooding</b>, <b>large frame abuse</b>,
+              <b>info disclosure</b>, <b>insecure transport</b>, <b>command injection</b>
+            </div>
+            <div class="run-bar mt-6">
+              <span class="run-status" id="ws-status">Idle</span>
+              <span class="run-count" id="ws-count">0 findings</span>
+            </div>
+            <div class="result-list" id="ws-results-list" style="max-height:220px;overflow-y:auto;margin-top:8px;"></div>
+          </div>
+        </div>
+
+        <!-- Activity Log -->
+        <div class="engine-block full-width">
+          <div class="engine-block-header">
+            <div class="engine-block-title">📋 Scan Activity Log</div>
+            <div class="flex-row">
+              <span class="run-count" id="activity-count" style="font-size:11px;color:var(--muted);">0 events</span>
+              <button class="btn-ghost btn-xs" onclick="loadActivity()" title="Refresh">↺</button>
+            </div>
+          </div>
+          <div class="engine-block-body" style="padding:0">
+            <div id="activity-list" style="max-height:180px;overflow-y:auto;font-size:11px;font-family:monospace;"></div>
+            <div id="activity-empty" style="color:var(--muted);font-size:12px;padding:12px 14px;">No scan events yet — start a spider or passive scan.</div>
           </div>
         </div>
 
@@ -997,14 +1208,19 @@ select.field-mini { cursor: pointer; }
                      placeholder="https://petstore.swagger.io/v2/swagger.json or /path/to/spec.json"
                      autocomplete="off" />
               <button class="btn-ghost btn-sm" id="btn-openapi-import" onclick="importOpenApi()">⬇ Import</button>
+              <button class="btn-ghost btn-sm" id="btn-openapi-import-scan" onclick="importOpenApi(true)" style="background:var(--accent);color:#000;font-weight:700;">⬇ Import &amp; Scan</button>
               <button class="btn-ghost btn-xs" onclick="viewOpenApiEndpoints()" title="Export endpoint list">👁 Endpoints</button>
             </div>
             <div class="flex-row">
               <span class="tool-status" id="openapi-status"></span>
               <span id="openapi-title" style="font-size:11px; font-weight:600; color:var(--fg2);"></span>
             </div>
+            <div id="openapi-scan-progress" style="display:none; margin-top:6px;">
+              <span style="font-size:11px; color:var(--accent);" id="openapi-scan-phase"></span>
+              <span style="font-size:11px; color:var(--fg3); margin-left:8px;" id="openapi-scan-stats"></span>
+            </div>
             <div id="openapi-results" style="display:none;"></div>
-            <div class="tool-hint">Supports OpenAPI 3.x &amp; Swagger 2.0 — JSON always, YAML needs <code>pip install pyyaml</code>. All endpoints added to site map for agent targeting.</div>
+            <div class="tool-hint">Supports OpenAPI 3.x &amp; Swagger 2.0 — JSON always, YAML needs <code>pip install pyyaml</code>. <b>Import &amp; Scan</b> auto-scans all discovered endpoints.</div>
           </div>
         </div>
 
@@ -1166,6 +1382,21 @@ select.field-mini { cursor: pointer; }
             <div class="report-card-desc">AI-powered finding analysis and executive summary</div>
           </div>
         </div>
+
+        <!-- ScrollArea: engine version history -->
+        <div class="scroll-area-wrap">
+          <div class="scroll-area-label">Engine Versions</div>
+          <div class="scroll-area" id="version-scroll-area">
+            <div class="scroll-area-viewport" id="version-viewport">
+              <h4 class="scroll-area-heading">Tags</h4>
+              <div id="version-tags-list"></div>
+            </div>
+            <div class="scroll-area-scrollbar" id="version-scrollbar">
+              <div class="scroll-area-thumb" id="version-thumb"></div>
+            </div>
+          </div>
+        </div>
+
       </div>
     </div>
 
@@ -1378,6 +1609,30 @@ async function scanLaunch() {
     toast(`${r.count} agents launched for ${target}`, 'ok');
   }
   startPoll();
+}
+
+async function probeTarget() {
+  const inp = document.getElementById('target-input');
+  const target = inp.value.trim();
+  if (!target) { toast('Enter a target URL first', 'err'); return; }
+  const btn = document.getElementById('btn-probe');
+  btn.disabled = true;
+  btn.textContent = '⏳';
+  const r = await api('/api/probe-target', 'POST', { target });
+  btn.disabled = false;
+  btn.textContent = '⚡ Probe';
+  if (!r) { toast('Probe failed', 'err'); return; }
+  if (!r.reachable) {
+    toast(`Target unreachable on port 80 and common alt-ports`, 'err');
+    return;
+  }
+  if (r.port_changed) {
+    inp.value = r.resolved;
+    const note = r.note || `switched to ${r.resolved}`;
+    toast(`${note} — HTTP ${r.status}`, 'ok');
+  } else {
+    toast(`Target reachable — HTTP ${r.status}`, 'ok');
+  }
 }
 
 async function scanStop() {
@@ -1687,21 +1942,51 @@ function renderFindings(findings) {
   }
   if (empty) empty.style.display = 'none';
 
-  let html = '';
+  // Group by finding text — same issue on multiple URLs → one card
+  const SEV_RANK = {critical:0, high:1, medium:2, low:3, info:4};
+  const groups = {};
   findings.forEach((f, idx) => {
-    const sev      = (f.severity || 'medium').toLowerCase();
+    const key = (f.finding || '').trim();
+    if (!groups[key]) {
+      groups[key] = { ...f, urls: [], indices: [] };
+    }
+    const sev = (f.severity || 'medium').toLowerCase();
+    const gsev = (groups[key].severity || 'medium').toLowerCase();
+    if ((SEV_RANK[sev] ?? 2) < (SEV_RANK[gsev] ?? 2)) groups[key].severity = f.severity;
+    const url = f.target || f.url || '';
+    if (url && !groups[key].urls.includes(url)) groups[key].urls.push(url);
+    groups[key].indices.push(idx);
+  });
+
+  const sorted = Object.values(groups).sort((a,b) =>
+    (SEV_RANK[(a.severity||'medium').toLowerCase()] ?? 2) -
+    (SEV_RANK[(b.severity||'medium').toLowerCase()] ?? 2)
+  );
+
+  let html = '';
+  sorted.forEach(g => {
+    const sev      = (g.severity || 'medium').toLowerCase();
     const sevBadge = `<span class="sev-badge sev-${sev}">${sev.toUpperCase()}</span>`;
+    const urlsHtml = g.urls.length > 1
+      ? `<div style="margin-top:4px;font-size:10px;color:var(--muted)">` +
+        `<b style="color:var(--fg2)">Affected (${g.urls.length}):</b> ` +
+        g.urls.slice(0,10).map(u => `<span style="color:var(--accent);font-family:monospace">${escHtml(u)}</span>`).join(', ') +
+        (g.urls.length > 10 ? ` +${g.urls.length-10} more` : '') +
+        `</div>`
+      : '';
+    const firstIdx = g.indices[0];
     html += `<div class="finding-item">
       <div class="fi-header">
-        <span class="fi-icon">${f.icon||'🔍'}</span>
+        <span class="fi-icon">${g.icon||'🔍'}</span>
         <div style="flex:1;">
-          <div class="fi-text">${sevBadge}${escHtml(f.finding)}</div>
+          <div class="fi-text">${sevBadge}${escHtml(g.finding)}</div>
           <div class="fi-meta">
-            <span class="fi-phase-tag" data-phase="${f.phase}">${f.phase}</span>
-            ${escHtml(f.agent)} · ${escHtml(f.target)}
+            <span class="fi-phase-tag" data-phase="${g.phase}">${g.phase}</span>
+            ${escHtml(g.agent)}${g.urls.length === 1 ? ' · ' + escHtml(g.urls[0]) : ''}
           </div>
+          ${urlsHtml}
           <div class="fi-actions">
-            <button class="btn-ghost btn-xs btn-fabric" onclick="openFabricFinding(${idx})" title="Analyse with Fabric">🧵 Fabric</button>
+            <button class="btn-ghost btn-xs btn-fabric" onclick="openFabricFinding(${firstIdx})" title="Analyse with Fabric">🧵 Fabric</button>
           </div>
         </div>
       </div>
@@ -1820,20 +2105,256 @@ async function clearOAST() {
 // ═══════════════════════════════════════════════════════════════
 async function runPassiveScan() {
   const target = document.getElementById('target-input').value.trim();
-  if (!target) { toast('Enter a target URL first', 'err'); return; }
-  const st = document.getElementById('passive-status');
-  if (st) st.textContent = '⏳ Scanning…';
+  if (!target) { toast('Enter a target URL first — use the bar at the top', 'err'); return; }
+  const st  = document.getElementById('passive-status');
+  const cnt = document.getElementById('passive-count');
+  if (st)  st.textContent  = '⏳ Scanning…';
+  if (cnt) cnt.textContent = '';
   const r = await api('/api/passive/scan', 'POST', { target });
-  if (r.error) {
-    if (st) st.textContent = '✗ ' + r.error;
-    toast(r.error, 'err');
+  if (!r || r.error) {
+    if (st) st.textContent = '✗ ' + (r?.error || 'Scan failed');
+    toast(r?.error || 'Passive scan failed', 'err');
     return;
   }
-  if (st) st.textContent = `✓ Done — ${r.findings_count || 0} findings`;
-  const cnt = document.getElementById('passive-count');
-  if (cnt) cnt.textContent = `${r.findings_count || 0} findings`;
-  toast(`Passive scan — ${r.findings_count || 0} findings`, 'ok');
+  const n     = r.findings_count || 0;
+  const pages = r.urls_scanned   || 1;
+  if (st)  st.textContent  = `✓ Done — ${n} findings across ${pages} pages`;
+  if (cnt) cnt.textContent = `${n} findings`;
+  toast(`Passive scan — ${n} findings across ${pages} pages`, n > 0 ? 'ok' : '');
   await loadPassiveFindings();
+  loadActivity();
+}
+
+// ── GraphQL Scanner ──────────────────────────────────────────────────────
+let _gqlPollTimer = null;
+
+async function startGraphqlScan() {
+  const target = document.getElementById('target-input').value.trim();
+  if (!target) { toast('Enter a target URL first', 'err'); return; }
+  const st  = document.getElementById('gql-status');
+  const cnt = document.getElementById('gql-count');
+  if (st)  st.textContent  = '⏳ Starting…';
+  if (cnt) cnt.textContent = '';
+  document.getElementById('btn-gql-scan').style.display = 'none';
+  document.getElementById('btn-gql-stop').style.display = '';
+
+  const r = await api('/api/engine/graphql/scan', 'POST', { target });
+  if (!r || r.error) {
+    if (st) st.textContent = '✗ ' + (r?.error || 'Failed');
+    toast(r?.error || 'GraphQL scan failed', 'err');
+    document.getElementById('btn-gql-scan').style.display = '';
+    document.getElementById('btn-gql-stop').style.display = 'none';
+    return;
+  }
+  toast('GraphQL security scan started — 12 test categories', 'ok');
+  _startGqlPoll();
+}
+
+async function stopGraphqlScan() {
+  await api('/api/engine/graphql/stop', 'POST');
+  _stopGqlPoll();
+  document.getElementById('btn-gql-scan').style.display = '';
+  document.getElementById('btn-gql-stop').style.display = 'none';
+}
+
+function _startGqlPoll() {
+  _stopGqlPoll();
+  _gqlPollTimer = setInterval(async () => {
+    const r = await api('/api/engine/graphql/status');
+    if (!r) return;
+    const st  = document.getElementById('gql-status');
+    const cnt = document.getElementById('gql-count');
+    if (st)  st.textContent  = r.running ? `⏳ ${r.status}` : `✓ ${r.status}`;
+    if (cnt) cnt.textContent = `${r.findings} findings`;
+    if (!r.running) {
+      _stopGqlPoll();
+      document.getElementById('btn-gql-scan').style.display = '';
+      document.getElementById('btn-gql-stop').style.display = 'none';
+      await _loadGqlResults();
+    }
+  }, 1500);
+}
+
+function _stopGqlPoll() {
+  if (_gqlPollTimer) { clearInterval(_gqlPollTimer); _gqlPollTimer = null; }
+}
+
+async function _loadGqlResults() {
+  const r = await api('/api/engine/graphql/results');
+  if (!r || !r.results) return;
+  const list = document.getElementById('gql-results-list');
+  if (!list) return;
+  if (!r.results.length) { list.innerHTML = '<div style="color:var(--muted);padding:8px;">No GraphQL vulnerabilities found.</div>'; return; }
+
+  const sevColor = { critical: '#f85149', high: '#f0883e', medium: '#d29922', low: '#7d8590', info: '#8b949e' };
+  list.innerHTML = r.results.map(f => {
+    const col = sevColor[f.severity] || '#8b949e';
+    return `<div style="padding:6px 10px;border-bottom:1px solid var(--border);font-size:12px;">
+      <span style="color:${col};font-weight:600;text-transform:uppercase;font-size:10px;margin-right:6px;">${f.severity}</span>
+      <span style="color:var(--fg);">${f.finding}</span>
+      ${f.payload ? `<div style="color:var(--muted);font-size:11px;margin-top:2px;">Payload: <code>${f.payload.substring(0,120)}</code></div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+// ── WebSocket Scanner ────────────────────────────────────────────────────
+let _wsPollTimer = null;
+
+async function startWsScan() {
+  const target = document.getElementById('target-input').value.trim();
+  if (!target) { toast('Enter a target URL first', 'err'); return; }
+  const st  = document.getElementById('ws-status');
+  const cnt = document.getElementById('ws-count');
+  if (st)  st.textContent  = '⏳ Starting…';
+  if (cnt) cnt.textContent = '';
+  document.getElementById('btn-ws-scan').style.display = 'none';
+  document.getElementById('btn-ws-stop').style.display = '';
+
+  const r = await api('/api/engine/websocket/scan', 'POST', { target });
+  if (!r || r.error) {
+    if (st) st.textContent = '✗ ' + (r?.error || 'Failed');
+    toast(r?.error || 'WebSocket scan failed', 'err');
+    document.getElementById('btn-ws-scan').style.display = '';
+    document.getElementById('btn-ws-stop').style.display = 'none';
+    return;
+  }
+  toast('WebSocket security scan started — 9 test categories', 'ok');
+  _startWsPoll();
+}
+
+async function stopWsScan() {
+  await api('/api/engine/websocket/stop', 'POST');
+  _stopWsPoll();
+  document.getElementById('btn-ws-scan').style.display = '';
+  document.getElementById('btn-ws-stop').style.display = 'none';
+}
+
+function _startWsPoll() {
+  _stopWsPoll();
+  _wsPollTimer = setInterval(async () => {
+    const r = await api('/api/engine/websocket/status');
+    if (!r) return;
+    const st  = document.getElementById('ws-status');
+    const cnt = document.getElementById('ws-count');
+    if (st)  st.textContent  = r.running ? `⏳ ${r.status}` : `✓ ${r.status}`;
+    if (cnt) cnt.textContent = `${r.findings} findings`;
+    if (!r.running) {
+      _stopWsPoll();
+      document.getElementById('btn-ws-scan').style.display = '';
+      document.getElementById('btn-ws-stop').style.display = 'none';
+      await _loadWsResults();
+    }
+  }, 1500);
+}
+
+function _stopWsPoll() {
+  if (_wsPollTimer) { clearInterval(_wsPollTimer); _wsPollTimer = null; }
+}
+
+async function _loadWsResults() {
+  const r = await api('/api/engine/websocket/results');
+  if (!r || !r.results) return;
+  const list = document.getElementById('ws-results-list');
+  if (!list) return;
+  if (!r.results.length) { list.innerHTML = '<div style="color:var(--muted);padding:8px;">No WebSocket vulnerabilities found.</div>'; return; }
+
+  const sevColor = { critical: '#f85149', high: '#f0883e', medium: '#d29922', low: '#7d8590', info: '#8b949e' };
+  list.innerHTML = r.results.map(f => {
+    const col = sevColor[f.severity] || '#8b949e';
+    return `<div style="padding:6px 10px;border-bottom:1px solid var(--border);font-size:12px;">
+      <span style="color:${col};font-weight:600;text-transform:uppercase;font-size:10px;margin-right:6px;">${f.severity}</span>
+      <span style="color:var(--fg);">${f.finding}</span>
+      ${f.payload ? `<div style="color:var(--muted);font-size:11px;margin-top:2px;">Payload: <code>${f.payload.substring(0,120)}</code></div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+async function loadAjaxResults() {
+  const r = await api('/api/engine/ajax-crawl/results');
+  if (!r || r.error) return;
+  const urls  = r.urls || [];
+  const list  = document.getElementById('ajax-results-list');
+  const cnt   = document.getElementById('ajax-count');
+  if (cnt) cnt.textContent = `${urls.length} URLs`;
+  if (!list) return;
+  if (!urls.length) { list.style.display = 'none'; return; }
+  list.style.display = '';
+
+  // Source badge per URL
+  const renderRow = u => {
+    let badge = '';
+    if (u.source === 'network') {
+      badge = `<span style="font-size:9px;background:#1f3a5f;color:#79c0ff;padding:1px 5px;border-radius:3px;margin-right:4px;">XHR</span>`;
+    } else if (u.source === 'katana') {
+      badge = `<span style="font-size:9px;background:#2d1f4a;color:#c792ea;padding:1px 5px;border-radius:3px;margin-right:4px;">Katana</span>`;
+    } else if (u.source === 'wayback') {
+      badge = `<span style="font-size:9px;background:#3a2800;color:#e3a937;padding:1px 5px;border-radius:3px;margin-right:4px;">Wayback</span>`;
+    } else if (u.source === 'websocket') {
+      badge = `<span style="font-size:9px;background:#1a2a4a;color:#58a6ff;padding:1px 5px;border-radius:3px;margin-right:4px;">WS</span>`;
+    } else if (u.source === 'sitemap' || u.source === 'robots') {
+      badge = `<span style="font-size:9px;background:#1a3a1a;color:#56d364;padding:1px 5px;border-radius:3px;margin-right:4px;">Sitemap</span>`;
+    } else if (u.source === 'traditional') {
+      badge = `<span style="font-size:9px;background:#2a2a2a;color:#8b949e;padding:1px 5px;border-radius:3px;margin-right:4px;">Trad</span>`;
+    } else if (u.source === 'graphql') {
+      badge = `<span style="font-size:9px;background:#3a1a3a;color:#f778ba;padding:1px 5px;border-radius:3px;margin-right:4px;">GraphQL</span>`;
+    } else if (u.source === 'form_submit') {
+      badge = `<span style="font-size:9px;background:#3a2510;color:#ffa657;padding:1px 5px;border-radius:3px;margin-right:4px;">Form</span>`;
+    } else {
+      badge = `<span style="font-size:9px;background:#1a3a2a;color:#3fb950;padding:1px 5px;border-radius:3px;margin-right:4px;">HTML</span>`;
+    }
+    const status = u.status ? `<span style="color:var(--muted);margin-left:4px;font-size:10px;">${u.status}</span>` : '';
+    return `<div class="result-item" style="font-size:11px;font-family:monospace;word-break:break-all;">` +
+      `${badge}<span style="color:var(--fg2)">${escHtml(u.url)}</span>${status}</div>`;
+  };
+  list.innerHTML = urls.map(renderRow).join('');
+}
+
+async function exportAjaxUrls() {
+  const r = await api('/api/engine/ajax-crawl/results');
+  if (!r || !r.urls || !r.urls.length) { toast('No AJAX URLs yet — run a crawl first', ''); return; }
+  const text = r.urls.map(u => u.url).join('\n');
+  const blob = new Blob([text], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'ajax_urls.txt';
+  a.click();
+  toast(`Exported ${r.urls.length} URLs`, 'ok');
+}
+
+const _ACTIVITY_ICONS = {
+  spider_start:  '🕷️ Spider started',
+  spider_stop:   '✅ Spider stopped',
+  ajax_start:    '🤖 AJAX crawl started',
+  ajax_done:     '✅ AJAX crawl done',
+  passive_scan:  '🛡️ Passive scan',
+  engine_start:  '⚡ Engine scan started',
+  engine_stop:   '✅ Engine scan stopped',
+};
+
+async function loadActivity() {
+  const r = await api('/api/activity');
+  if (!r || r.error) return;
+  const events = r.events || [];
+  const list   = document.getElementById('activity-list');
+  const empty  = document.getElementById('activity-empty');
+  const cnt    = document.getElementById('activity-count');
+  if (cnt) cnt.textContent = `${events.length} events`;
+  if (!list) return;
+  if (!events.length) {
+    list.innerHTML = '';
+    if (empty) empty.style.display = '';
+    return;
+  }
+  if (empty) empty.style.display = 'none';
+  list.innerHTML = events.map(e => {
+    const label  = _ACTIVITY_ICONS[e.event] || e.event;
+    const detail = e.detail ? ` — ${escHtml(e.detail)}` : '';
+    const tgt    = e.target ? `<span style="color:var(--accent);margin-left:4px">${escHtml(e.target)}</span>` : '';
+    return `<div style="padding:5px 12px;border-bottom:1px solid var(--border);">` +
+      `<span style="color:var(--muted)">[${e.ts}]</span> ` +
+      `<span style="color:var(--fg2)">${label}</span>${tgt}` +
+      `<span style="color:var(--muted)">${detail}</span></div>`;
+  }).join('');
 }
 
 async function loadPassiveFindings() {
@@ -1925,15 +2446,21 @@ async function viewBrowseResults() {
 // ═══════════════════════════════════════════════════════════════
 // OPENAPI IMPORT
 // ═══════════════════════════════════════════════════════════════
-async function importOpenApi() {
+let _openapiScanPoll = null;
+
+async function importOpenApi(autoScan = false) {
   const url = document.getElementById('openapi-url').value.trim();
   if (!url) { toast('Enter a spec URL', 'err'); return; }
-  const btn = document.getElementById('btn-openapi-import');
-  const st  = document.getElementById('openapi-status');
+  const btn   = document.getElementById('btn-openapi-import');
+  const btn2  = document.getElementById('btn-openapi-import-scan');
+  const st    = document.getElementById('openapi-status');
   btn.disabled = true;
-  if (st) st.textContent = '⏳ Fetching spec…';
-  const r = await api('/api/openapi/import', 'POST', { url });
+  if (btn2) btn2.disabled = true;
+  if (st) st.textContent = autoScan ? '⏳ Importing & starting scan…' : '⏳ Fetching spec…';
+
+  const r = await api('/api/openapi/import', 'POST', { url, auto_scan: autoScan });
   btn.disabled = false;
+  if (btn2) btn2.disabled = false;
   if (r.error) {
     if (st) st.textContent = '✗ ' + r.error;
     toast(r.error, 'err'); return;
@@ -1943,7 +2470,42 @@ async function importOpenApi() {
   const ti = document.getElementById('openapi-title');
   if (ep) ep.textContent = r.endpoints_found + ' endpoints';
   if (ti) ti.textContent = `${r.title} v${r.version}`;
-  toast(`OpenAPI import — ${r.endpoints_found} endpoints`, 'ok');
+
+  if (r.scan_started) {
+    toast(`OpenAPI import — ${r.endpoints_found} endpoints — auto-scan started`, 'ok');
+    _startOpenApiScanPoll();
+  } else if (r.scan_skipped) {
+    toast(`Imported ${r.endpoints_found} endpoints — scan skipped: ${r.scan_skipped}`, 'warn');
+  } else {
+    toast(`OpenAPI import — ${r.endpoints_found} endpoints`, 'ok');
+  }
+}
+
+function _startOpenApiScanPoll() {
+  const progDiv = document.getElementById('openapi-scan-progress');
+  if (progDiv) progDiv.style.display = 'block';
+  if (_openapiScanPoll) clearInterval(_openapiScanPoll);
+  _openapiScanPoll = setInterval(async () => {
+    const s = await api('/api/engine/status');
+    if (!s) return;
+    const phaseEl = document.getElementById('openapi-scan-phase');
+    const statsEl = document.getElementById('openapi-scan-stats');
+    const phase = (s.progress?.phase || s.status || '').replace(/_/g, ' ');
+    if (phaseEl) phaseEl.textContent = `⚡ ${phase}`;
+    if (statsEl) {
+      const parts = [];
+      if (s.progress?.surfaces_found) parts.push(`${s.progress.surfaces_found} surfaces`);
+      if (s.progress?.findings_count) parts.push(`${s.progress.findings_count} findings`);
+      if (s.progress?.passive_count)  parts.push(`${s.progress.passive_count} passive`);
+      statsEl.textContent = parts.join(' · ');
+    }
+    if (!s.running || phase === 'complete' || phase === 'error') {
+      clearInterval(_openapiScanPoll);
+      _openapiScanPoll = null;
+      if (phaseEl) phaseEl.textContent = phase === 'error' ? `✗ ${s.status}` : '✓ Scan complete';
+      if (phase === 'complete') toast(`OpenAPI auto-scan complete — ${s.progress?.findings_count || 0} findings`, 'ok');
+    }
+  }, 1500);
 }
 
 async function loadOpenApiStatus() {
@@ -1987,6 +2549,7 @@ async function startSpider() {
   document.getElementById('btn-spider-start').style.display = 'none';
   document.getElementById('btn-spider-stop').style.display  = 'inline-block';
   _spiderPollTimer = setInterval(pollSpider, 1500);
+  setTimeout(loadActivity, 500);
 }
 
 async function stopSpider() {
@@ -2010,6 +2573,7 @@ async function pollSpider() {
     document.getElementById('btn-spider-stop').style.display  = 'none';
     if (st) st.textContent = `✓ ${r.status} — ${r.urls_found} URLs`;
     toast(`Spider done — ${r.urls_found} URLs`, 'ok');
+    loadActivity();
   }
 }
 
@@ -2027,24 +2591,130 @@ async function viewSpiderResults() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// AJAX CRAWL
+// ADVANCED CRAWLER (Playwright + Katana unified)
 // ═══════════════════════════════════════════════════════════════
+
+function _updateAdvBadges(playwrightAvail, katanaAvail, breakdown, httpxAvail) {
+  const pw   = document.getElementById('adv-badge-playwright');
+  const kt   = document.getElementById('adv-badge-katana');
+  const wb   = document.getElementById('adv-badge-wayback');
+  const hx   = document.getElementById('adv-badge-httpx');
+  const sm   = document.getElementById('adv-badge-sitemap');
+  const gql  = document.getElementById('adv-badge-graphql');
+  const frm  = document.getElementById('adv-badge-form');
+  const bd   = document.getElementById('adv-breakdown');
+
+  if (pw) {
+    pw.textContent      = 'Playwright (3×)';
+    pw.style.background = playwrightAvail ? '#1a3a2a' : '#3a1a1a';
+    pw.style.color      = playwrightAvail ? '#3fb950' : '#f85149';
+  }
+  if (kt) {
+    kt.textContent      = 'Katana';
+    kt.style.background = katanaAvail ? '#2d1f4a' : '#3a1a1a';
+    kt.style.color      = katanaAvail ? '#c792ea' : '#f85149';
+  }
+  if (wb) {
+    wb.textContent      = 'Wayback';
+    wb.style.background = '#3a2800';
+    wb.style.color      = '#e3a937';
+  }
+  if (hx) {
+    hx.textContent      = httpxAvail ? 'httpx' : 'httpx (requests)';
+    hx.style.background = httpxAvail ? '#1a2a3a' : '#2a2a1a';
+    hx.style.color      = httpxAvail ? '#58a6ff' : '#9e8c5a';
+  }
+  if (sm) {
+    sm.textContent      = 'Sitemap';
+    sm.style.background = '#1a3a1a';
+    sm.style.color      = '#56d364';
+  }
+  if (gql) {
+    gql.textContent      = 'GraphQL';
+    gql.style.background = '#3a1a3a';
+    gql.style.color      = '#f778ba';
+  }
+  if (frm) {
+    frm.textContent      = 'SmartForm';
+    frm.style.background = '#3a2510';
+    frm.style.color      = '#ffa657';
+  }
+  if (bd && breakdown) {
+    const parts = [];
+    if (breakdown.browser)      parts.push(`${breakdown.browser} HTML`);
+    if (breakdown.network)      parts.push(`${breakdown.network} XHR`);
+    if (breakdown.websocket)    parts.push(`${breakdown.websocket} WS`);
+    if (breakdown.katana)       parts.push(`${breakdown.katana} Katana`);
+    if (breakdown.wayback)      parts.push(`${breakdown.wayback} Wayback`);
+    if (breakdown.sitemap)      parts.push(`${breakdown.sitemap} Sitemap`);
+    if (breakdown.traditional)  parts.push(`${breakdown.traditional} Trad`);
+    if (breakdown.graphql)      parts.push(`${breakdown.graphql} GraphQL`);
+    if (breakdown.form_submit)  parts.push(`${breakdown.form_submit} Form`);
+    bd.textContent = parts.length ? `(${parts.join(', ')})` : '';
+  }
+}
+
 async function runAjaxCrawl() {
   const target = document.getElementById('target-input').value.trim();
   if (!target) { toast('Enter a target URL first', 'err'); return; }
   const btn = document.getElementById('btn-ajax');
   const st  = document.getElementById('ajax-status');
   btn.disabled = true;
-  if (st) st.textContent = '⏳ Crawling with headless Chromium…';
-  const r = await api('/api/ajax-crawl', 'POST', { target });
-  btn.disabled = false;
-  if (r.error) {
-    if (st) st.textContent = '✗ ' + r.error;
-    toast(r.error, 'err');
-  } else {
-    if (st) st.textContent = `✓ Found ${r.urls_found || 0} URLs`;
-    toast(`AJAX crawl — ${r.urls_found || 0} URLs`, 'ok');
+  if (st) st.textContent = '⏳ Launching Advanced Crawler…';
+
+  // Fetch capabilities first to render availability badges
+  const cap = await api('/api/capabilities');
+  if (cap) {
+    _updateAdvBadges(cap.ajax_spider?.available, cap.katana?.available, null, cap.httpx?.available);
   }
+
+  // Start the crawl
+  const r = await api('/api/engine/ajax-crawl', 'POST', { target });
+  if (!r || r.error) {
+    btn.disabled = false;
+    if (st) st.textContent = '✗ ' + (r?.error || 'Failed to start');
+    toast(r?.error || 'Advanced Crawler failed', 'err');
+    return;
+  }
+
+  // Update badges from start response
+  _updateAdvBadges(r.playwright, r.katana, null, r.httpx);
+
+  const toolList = [r.playwright && 'Playwright (3×)', r.katana && 'Katana', r.wayback && 'Wayback', 'Sitemap', 'GraphQL'].filter(Boolean).join(' + ');
+  setTimeout(loadActivity, 500);
+  if (st) st.textContent = `⏳ Crawling with ${toolList}…`;
+
+  // Poll until done
+  let dots = 0;
+  const _poll = setInterval(async () => {
+    const s = await api('/api/engine/ajax-crawl/status');
+    if (!s) return;
+    dots = (dots + 1) % 4;
+    const ellipsis = '.'.repeat(dots + 1);
+    if (s.running) {
+      if (st) st.textContent = `⏳ Crawling${ellipsis}`;
+    } else {
+      clearInterval(_poll);
+      btn.disabled = false;
+      const n = s.urls_found || 0;
+      _updateAdvBadges(s.playwright_available, s.katana_available, s.breakdown, s.httpx_available);
+      if (st) st.textContent = `✓ Found ${n} URLs`;
+      const bd = s.breakdown || {};
+      const parts = [
+        bd.browser     && `${bd.browser} HTML`,
+        bd.network     && `${bd.network} XHR`,
+        bd.websocket   && `${bd.websocket} WS`,
+        bd.katana      && `${bd.katana} Katana`,
+        bd.wayback     && `${bd.wayback} Wayback`,
+        bd.sitemap     && `${bd.sitemap} Sitemap`,
+        bd.traditional && `${bd.traditional} Trad`,
+        bd.graphql     && `${bd.graphql} GraphQL`,
+      ].filter(Boolean);
+      toast(`Advanced Crawler — ${n} URLs${parts.length ? ' (' + parts.join(', ') + ')' : ''}`, 'ok');
+      loadAjaxResults();
+      loadActivity();
+    }
+  }, 2000);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -2144,7 +2814,14 @@ async function loadCapabilitiesStatus() {
   const rt = r.hooks?.runtimes || {};
   el.innerHTML = `
     <div class="cap-row"><span class="cap-name">Proxy (mitmproxy)</span>${tick(r.proxy?.available)}</div>
-    <div class="cap-row"><span class="cap-name">AJAX Spider (Playwright)</span>${tick(r.playwright?.available)}</div>
+    <div class="cap-row"><span class="cap-name">Crawler — Playwright (3-tab)</span>${tick(r.ajax_spider?.available)}</div>
+    <div class="cap-row"><span class="cap-name">Crawler — Katana (JS static)</span>${tick(r.katana?.available)}</div>
+    <div class="cap-row"><span class="cap-name">Crawler — Wayback CDX</span>${tick(r.wayback?.available)}</div>
+    <div class="cap-row"><span class="cap-name">Crawler — Sitemap / robots.txt</span>${tick(r.sitemap_seed?.available)}</div>
+    <div class="cap-row"><span class="cap-name">Crawler — GraphQL introspection</span>${tick(r.graphql?.available)}</div>
+    <div class="cap-row"><span class="cap-name">GraphQL Security Scanner (12 tests)</span>${tick(r.graphql_scanner?.available)}</div>
+    <div class="cap-row"><span class="cap-name">WebSocket Security Scanner (9 tests)</span>${tick(r.ws_scanner?.available)}</div>
+    <div class="cap-row"><span class="cap-name">Crawler — WebSocket capture</span>${tick(r.websocket?.available)}</div>
     <div class="cap-row"><span class="cap-name">Passive Scanner</span>${tick(r.passive_scanner?.available)}</div>
     <div class="cap-row"><span class="cap-name">Forced Browse</span>${tick(r.forced_browse?.available)}</div>
     <div class="cap-row"><span class="cap-name">OAST Listener</span>${tick(r.oast?.available)}</div>
@@ -2292,6 +2969,155 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeFabric(
 
   // Load initial overview data
   await refreshOverview();
+  loadActivity();
+  loadAjaxResults();
+
+  // Set initial Advanced Crawler badges from capabilities
+  const initCap = await api('/api/capabilities');
+  if (initCap) {
+    _updateAdvBadges(initCap.ajax_spider?.available, initCap.katana?.available, null, initCap.httpx?.available);
+  }
+})();
+
+/* ── ScrollProgress (ported from scroll-progress-1.tsx + framer-motion) ── */
+(function initScrollProgress() {
+  var bar = document.getElementById('sp-top');
+  var pct = document.getElementById('sp-pct-top');
+  if (!bar) return;
+
+  /* Spring simulation matching framer-motion useSpring defaults:
+     stiffness=200, damping=50, restDelta=0.001 */
+  var spPos = 0, spVel = 0, spTarget = 0;
+  var STIFFNESS = 200, DAMPING = 50, REST = 0.001;
+  var rafId = null, lastT = null;
+
+  function springTick(now) {
+    var dt = lastT ? Math.min((now - lastT) / 1000, 0.05) : 0.016;
+    lastT = now;
+    var force = (spTarget - spPos) * STIFFNESS;
+    spVel   = spVel + force * dt - spVel * DAMPING * dt;
+    spPos   = spPos + spVel * dt;
+    if (Math.abs(spTarget - spPos) < REST && Math.abs(spVel) < REST) {
+      spPos = spTarget; spVel = 0;
+    }
+    var clamped = Math.max(0, Math.min(1, spPos));
+    bar.style.transform = 'scaleX(' + clamped + ')';
+    if (pct) {
+      var p = Math.round(clamped * 100);
+      pct.textContent = p + '%';
+      if (p > 0) pct.classList.add('sp-pct-visible');
+      else       pct.classList.remove('sp-pct-visible');
+    }
+    rafId = requestAnimationFrame(springTick);
+  }
+
+  function setTarget(t) {
+    spTarget = t;
+    if (!rafId) { lastT = null; rafId = requestAnimationFrame(springTick); }
+  }
+
+  /* Track scroll of a given element */
+  function getProgress(el) {
+    var sh = el.scrollHeight - el.clientHeight;
+    return sh > 0 ? Math.min(1, el.scrollTop / sh) : 0;
+  }
+
+  var activeEl = null;
+  var listeners = new Map();
+
+  function attachTo(el) {
+    if (!el) return;
+    if (!listeners.has(el)) {
+      var fn = function() { setTarget(getProgress(el)); };
+      listeners.set(el, fn);
+      el.addEventListener('scroll', fn, { passive: true });
+    }
+    activeEl = el;
+    setTarget(getProgress(el)); // reset to this section's current scroll
+  }
+
+  /* Section IDs that are scrollable */
+  var SECTION_SCROLL_IDS = {
+    overview: 'section-overview',
+    engine:   'section-engine',
+    tools:    'section-tools',
+    reports:  'section-reports',
+    agents:   'agent-grid-wrap',   // agent section scrolls inside the grid wrap
+  };
+
+  function attachToSection(section) {
+    var id = SECTION_SCROLL_IDS[section];
+    var el = id ? document.getElementById(id) : null;
+    if (el) attachTo(el);
+  }
+
+  /* Patch switchSection to re-attach on section change */
+  var _origSwitch = window.switchSection;
+  window.switchSection = function(section) {
+    _origSwitch(section);
+    attachToSection(section);
+  };
+
+  /* Attach to current active section on init */
+  var activeNav = document.querySelector('.nav-item.active[data-section]');
+  var initSection = activeNav ? activeNav.getAttribute('data-section') : 'overview';
+  attachToSection(initSection);
+})();
+
+/* ── ScrollArea — version tags (ported from shadcn scroll-area-1.tsx) ── */
+(function initScrollArea() {
+  var tags = Array.from({ length: 50 }).map(function(_, i, a) {
+    return 'v1.2.0-beta.' + (a.length - i);
+  });
+
+  // Render tag items + separators
+  var list = document.getElementById('version-tags-list');
+  if (!list) return;
+  tags.forEach(function(tag, idx) {
+    var item = document.createElement('div');
+    item.className = 'scroll-area-item';
+    item.textContent = tag;
+    list.appendChild(item);
+    if (idx < tags.length - 1) {
+      var sep = document.createElement('div');
+      sep.className = 'scroll-area-sep';
+      list.appendChild(sep);
+    }
+  });
+
+  // Custom scrollbar sync
+  var viewport = document.getElementById('version-viewport');
+  var thumb    = document.getElementById('version-thumb');
+  var scrollbar = document.getElementById('version-scrollbar');
+  if (!viewport || !thumb || !scrollbar) return;
+
+  function updateThumb() {
+    var ratio       = viewport.clientHeight / viewport.scrollHeight;
+    var thumbH      = Math.max(ratio * viewport.clientHeight, 20);
+    var thumbTop    = (viewport.scrollTop / viewport.scrollHeight) * viewport.clientHeight;
+    thumb.style.height = thumbH + 'px';
+    thumb.style.transform = 'translateY(' + thumbTop + 'px)';
+    scrollbar.style.opacity = ratio >= 1 ? '0' : '1';
+  }
+
+  viewport.addEventListener('scroll', updateThumb);
+  window.addEventListener('resize', updateThumb);
+  updateThumb();
+
+  // Drag to scroll
+  var dragging = false, startY = 0, startScroll = 0;
+  thumb.addEventListener('mousedown', function(e) {
+    dragging = true; startY = e.clientY;
+    startScroll = viewport.scrollTop;
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', function(e) {
+    if (!dragging) return;
+    var ratio     = viewport.scrollHeight / viewport.clientHeight;
+    var delta     = (e.clientY - startY) * ratio;
+    viewport.scrollTop = startScroll + delta;
+  });
+  document.addEventListener('mouseup', function() { dragging = false; });
 })();
 </script>
 </body>

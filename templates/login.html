@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DAST Engine</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      width: 100%; height: 100%;
+      background: #000;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      overflow: hidden;
+    }
+
+    /* ── WebGL canvas ──────────────────────────────────────────────────── */
+    #shader-bg {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      touch-action: none;
+    }
+
+    /* ── Meteor layer (z:5 — above shader, below content) ─────────────── */
+    #meteor-layer {
+      position: fixed;
+      inset: 0;
+      z-index: 5;
+      pointer-events: none;
+      overflow: hidden;
+    }
+
+    .meteor {
+      position: absolute;
+      border-radius: 9999px;
+      transform-origin: left center;
+      opacity: 0;
+      animation: meteor-fall linear infinite;
+    }
+
+    @keyframes meteor-fall {
+      0%   { opacity: 0;   transform: rotate(-45deg) translate(0, 0); }
+      4%   { opacity: 1; }
+      85%  { opacity: 1; }
+      100% { opacity: 0;   transform: rotate(-45deg) translate(900px, 900px); }
+    }
+
+    /* ── Content overlay (z:10) ────────────────────────────────────────── */
+    .hero-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 10;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem 4rem;
+      padding-bottom: 15vh;
+      gap: 0;
+    }
+
+    /* ── Animations ────────────────────────────────────────────────────── */
+    @keyframes fade-in-down {
+      from { opacity: 0; transform: translateY(-18px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes fade-in-up {
+      from { opacity: 0; transform: translateY(22px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes gradient-shift {
+      0%   { background-position: 0% 50%; }
+      50%  { background-position: 100% 50%; }
+      100% { background-position: 0% 50%; }
+    }
+
+    .fade-in-down { animation: fade-in-down 0.8s ease-out both; }
+    .fade-in-up   { animation: fade-in-up   0.8s ease-out both; opacity: 0; }
+    .d1 { animation-delay: 0.15s; }
+    .d2 { animation-delay: 0.30s; }
+    .d3 { animation-delay: 0.45s; }
+    .d4 { animation-delay: 0.60s; }
+    .d5 { animation-delay: 0.75s; }
+    .d6 { animation-delay: 0.90s; }
+    .d7 { animation-delay: 1.05s; }
+
+    /* ── Trust badge ───────────────────────────────────────────────────── */
+    .trust-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.55rem 1.3rem;
+      background: rgba(249, 115, 22, 0.1);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(253, 186, 116, 0.3);
+      border-radius: 9999px;
+      color: #ffedd5;
+      font-size: 0.82rem;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      margin-bottom: 0.7rem;
+    }
+
+    /* ── Two-column row ────────────────────────────────────────────────── */
+    .content-row {
+      display: flex;
+      align-items: center;
+      gap: clamp(2.5rem, 7vw, 7rem);
+      width: 100%;
+      max-width: 68rem;
+    }
+
+    /* ── Left column: subtitle + headlines ─────────────────────────────── */
+    .headline-block {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 0.6rem;
+    }
+
+    .subtitle {
+      font-size: clamp(0.82rem, 1.2vw, 0.95rem);
+      font-weight: 600;
+      color: rgba(255, 237, 213, 0.85);
+      line-height: 1.5;
+      text-align: center;
+      max-width: 34rem;
+      margin-bottom: 1.8rem;
+    }
+
+    .headline-1,
+    .headline-2 {
+      display: block;
+      font-weight: 700;
+      font-size: clamp(2.6rem, 5.8vw, 5.8rem);
+      line-height: 1.05;
+      background-clip: text;
+      -webkit-background-clip: text;
+      color: transparent;
+      -webkit-text-fill-color: transparent;
+      background-size: 200% 200%;
+      animation: gradient-shift 3s ease infinite;
+    }
+    .headline-1 { background-image: linear-gradient(90deg, #fdba74, #facc15, #fcd34d); }
+    .headline-2 { background-image: linear-gradient(90deg, #fde047, #fb923c, #f87171); }
+
+    /* ── Right column: login form ──────────────────────────────────────── */
+    .login-block {
+      flex: 0 0 auto;
+      width: clamp(17rem, 22vw, 21rem);
+      display: flex;
+      flex-direction: column;
+      gap: 0.7rem;
+    }
+
+    .error-msg {
+      padding: 0.55rem 1rem;
+      background: rgba(239, 68, 68, 0.12);
+      border: 1px solid rgba(239, 68, 68, 0.35);
+      border-radius: 0.5rem;
+      color: #fca5a5;
+      font-size: 0.82rem;
+    }
+
+    .login-input {
+      width: 100%;
+      padding: 0.8rem 1.2rem;
+      background: rgba(249, 115, 22, 0.07);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      border: 1px solid rgba(253, 186, 116, 0.22);
+      border-radius: 9999px;
+      color: #ffedd5;
+      font-size: 0.92rem;
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
+    }
+    .login-input::placeholder { color: rgba(253, 186, 116, 0.38); }
+    .login-input:focus {
+      border-color: rgba(253, 186, 116, 0.6);
+      box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.15);
+      background: rgba(249, 115, 22, 0.11);
+    }
+    .login-input:-webkit-autofill,
+    .login-input:-webkit-autofill:focus {
+      -webkit-box-shadow: 0 0 0 100px rgba(20, 8, 0, 0.95) inset;
+      -webkit-text-fill-color: #ffedd5;
+    }
+
+    .submit-btn {
+      width: 100%;
+      padding: 0.8rem 2rem;
+      background: linear-gradient(90deg, #f97316, #eab308);
+      border: none;
+      border-radius: 9999px;
+      color: #000;
+      font-size: 0.92rem;
+      font-weight: 600;
+      cursor: pointer;
+      letter-spacing: 0.03em;
+      transition: transform 0.15s, box-shadow 0.2s;
+    }
+    .submit-btn:hover {
+      background: linear-gradient(90deg, #ea580c, #ca8a04);
+      transform: scale(1.035);
+      box-shadow: 0 8px 28px rgba(249, 115, 22, 0.38);
+    }
+    .submit-btn:active  { transform: scale(0.975); }
+    .submit-btn:disabled { opacity: 0.65; cursor: not-allowed; transform: none; }
+
+    .debug-hint {
+      font-size: 0.7rem;
+      color: rgba(253, 186, 116, 0.32);
+      text-align: center;
+    }
+
+    /* ── Responsive stack ──────────────────────────────────────────────── */
+    @media (max-width: 640px) {
+      .hero-overlay   { padding: 1.5rem; justify-content: flex-start; }
+      .content-row    { flex-direction: column; gap: 2.5rem; }
+      .headline-block { align-items: center; text-align: center; }
+      .login-block    { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+
+  <canvas id="shader-bg"></canvas>
+  <div id="meteor-layer"></div>
+
+  <div class="hero-overlay">
+
+    <!-- Badge: centered top -->
+    <div class="trust-badge fade-in-down">
+      <span>⚡</span>
+      <span>AI-Powered DAST Engine — Active</span>
+    </div>
+
+    <!-- Subtitle: centered, just below badge -->
+    <p class="subtitle fade-in-up d1">
+      Autonomous vulnerability detection across every endpoint,
+      parameter, and injection vector — powered by AI agents.
+    </p>
+
+    <!-- Two columns -->
+    <div class="content-row">
+
+      <!-- LEFT: headlines -->
+      <div class="headline-block">
+        <span class="headline-1 fade-in-up d2">Scan Every</span>
+        <span class="headline-2 fade-in-up d3">Attack Surface</span>
+      </div>
+
+      <!-- RIGHT: login form -->
+      <div class="login-block">
+        {% if error %}
+        <div class="error-msg fade-in-up d2">⚠ {{ error }}</div>
+        {% endif %}
+
+        <form method="POST" action="/login" id="login-form" style="display:contents">
+          <input
+            class="login-input fade-in-up d4"
+            type="text"
+            name="username"
+            placeholder="Username"
+            autocomplete="username"
+            required
+            autofocus
+          >
+          <input
+            class="login-input fade-in-up d5"
+            type="password"
+            name="password"
+            placeholder="Password"
+            autocomplete="off"
+            required
+          >
+          {% if config.DEBUG %}
+          <p class="debug-hint fade-in-up d6">Default: admin / admin</p>
+          {% endif %}
+          <button class="submit-btn fade-in-up d6" type="submit" id="submit-btn">
+            Get Started →
+          </button>
+        </form>
+      </div>
+
+    </div>
+  </div>
+
+  <script>
+  /* ── Meteor shower ──────────────────────────────────────────────────── */
+  (function () {
+    var layer = document.getElementById('meteor-layer');
+
+    for (var i = 0; i < 38; i++) {
+      var m = document.createElement('div');
+      m.className = 'meteor';
+
+      // Spawn along the top edge and right edge
+      var edge = Math.random() < 0.65;
+      m.style.left = (edge ? Math.random() * 120 - 10 : 85 + Math.random() * 25) + 'vw';
+      m.style.top  = (edge ? -8 - Math.random() * 20  : Math.random() * 50 - 10) + 'vh';
+
+      // Length 55–200px, thickness 1–2px
+      var len   = 55 + Math.random() * 145;
+      var thick = 0.9 + Math.random() * 1.1;
+      m.style.width  = len + 'px';
+      m.style.height = thick + 'px';
+
+      // Gradient: bright head → transparent tail (left to right, since rotated −45°)
+      var warm = Math.random();
+      var head = warm < 0.4
+        ? 'rgba(255,220,130,0.95)'   // warm white-amber
+        : warm < 0.75
+          ? 'rgba(253,186,116,0.9)'  // amber
+          : 'rgba(249,115,22,0.85)'; // orange
+      m.style.background =
+        'linear-gradient(90deg,' + head + ',rgba(249,115,22,0))';
+
+      // Angle variation −38° to −52°
+      var angle = -(38 + Math.random() * 14);
+      m.style.transform = 'rotate(' + angle + 'deg)';
+
+      // Speed & pre-start offset so screen is populated immediately
+      var dur   = 1.8 + Math.random() * 4.5;
+      var delay = -(Math.random() * 14);
+      m.style.animationDuration = dur.toFixed(2) + 's';
+      m.style.animationDelay   = delay.toFixed(2) + 's';
+
+      // Opacity variation for depth perception
+      m.style.opacity = (0.3 + Math.random() * 0.7).toFixed(2);
+
+      // Box shadow for faint glow on brighter meteors
+      if (Math.random() > 0.55) {
+        m.style.boxShadow = '0 0 4px 1px rgba(253,186,116,0.25)';
+      }
+
+      layer.appendChild(m);
+    }
+  })();
+
+  /* ── WebGL Cosmic Nebula ────────────────────────────────────────────── */
+  (function () {
+    var canvas = document.getElementById('shader-bg');
+    var gl = null;
+    try { gl = canvas.getContext('webgl2'); } catch (e) {}
+    if (!gl) { canvas.style.background = '#0a0505'; return; }
+
+    var VS = `#version 300 es
+in vec4 position;
+void main(){gl_Position=position;}`;
+
+    var FS = `#version 300 es
+precision highp float;
+out vec4 O;
+uniform vec2 resolution;
+uniform float time;
+uniform vec2 move;
+uniform vec2 touch;
+uniform int pointerCount;
+#define FC gl_FragCoord.xy
+#define T time
+#define R resolution
+#define MN min(R.x,R.y)
+float rnd(vec2 p){p=fract(p*vec2(12.9898,78.233));p+=dot(p,p+34.56);return fract(p.x*p.y);}
+float noise(in vec2 p){
+  vec2 i=floor(p),f=fract(p),u=f*f*(3.-2.*f);
+  return mix(mix(rnd(i),rnd(i+vec2(1,0)),u.x),mix(rnd(i+vec2(0,1)),rnd(i+1.),u.x),u.y);
+}
+float fbm(vec2 p){
+  float t=.0,a=1.;mat2 m=mat2(1.,-.5,.2,1.2);
+  for(int i=0;i<5;i++){t+=a*noise(p);p*=2.*m;a*=.5;}
+  return t;
+}
+float clouds(vec2 p){
+  float d=1.,t=.0;
+  for(float i=.0;i<3.;i++){
+    float a=d*fbm(i*10.+p.x*.2+.2*(1.+i)*p.y+d+i*i+p);
+    t=mix(t,d,a);d=a;p*=2./(i+1.);
+  }
+  return t;
+}
+void main(void){
+  vec2 uv=(FC-.5*R)/MN,st=uv*vec2(2,1);
+  vec3 col=vec3(0);
+  float bg=clouds(vec2(st.x+T*.5,-st.y));
+  uv*=1.-.3*(sin(T*.2)*.5+.5);
+  for(float i=1.;i<12.;i++){
+    uv+=.1*cos(i*vec2(.1+.01*i,.8)+i*i+T*.5+.1*uv.x);
+    vec2 p=uv;float d=length(p);
+    col+=.00125/d*(cos(sin(i)*vec3(1,2,3))+1.);
+    float b=noise(i+p+bg*1.731);
+    col+=.002*b/length(max(p,vec2(b*p.x*.02,p.y)));
+    col=mix(col,vec3(bg*.25,bg*.137,bg*.05),d);
+  }
+  O=vec4(col,1);
+}`;
+
+    function mkShader(type, src) {
+      var s = gl.createShader(type);
+      gl.shaderSource(s, src);
+      gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+        console.warn('[DAST] Shader error:', gl.getShaderInfoLog(s));
+        return null;
+      }
+      return s;
+    }
+
+    var vs = mkShader(gl.VERTEX_SHADER, VS);
+    var fs = mkShader(gl.FRAGMENT_SHADER, FS);
+    if (!vs || !fs) { canvas.style.background = '#0a0505'; return; }
+
+    var prog = gl.createProgram();
+    gl.attachShader(prog, vs);
+    gl.attachShader(prog, fs);
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      canvas.style.background = '#0a0505'; return;
+    }
+    gl.useProgram(prog);
+
+    var buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,1,-1,-1,1,1,1]), gl.STATIC_DRAW);
+    var posLoc = gl.getAttribLocation(prog, 'position');
+    gl.enableVertexAttribArray(posLoc);
+    gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+    var uRes   = gl.getUniformLocation(prog, 'resolution');
+    var uTime  = gl.getUniformLocation(prog, 'time');
+    var uMove  = gl.getUniformLocation(prog, 'move');
+    var uTouch = gl.getUniformLocation(prog, 'touch');
+    var uPtrs  = gl.getUniformLocation(prog, 'pointerCount');
+
+    var mouseX = 0, mouseY = 0, moveDX = 0, moveDY = 0;
+    canvas.addEventListener('pointermove', function (e) {
+      moveDX += e.movementX; moveDY += e.movementY;
+      mouseX = e.clientX; mouseY = canvas.height - e.clientY;
+    });
+
+    function resize() {
+      var dpr = Math.max(1, 0.5 * window.devicePixelRatio);
+      canvas.width  = window.innerWidth  * dpr;
+      canvas.height = window.innerHeight * dpr;
+      gl.viewport(0, 0, canvas.width, canvas.height);
+    }
+    resize();
+    window.addEventListener('resize', resize);
+
+    var t0 = performance.now();
+    (function render() {
+      gl.uniform2f(uRes,   canvas.width, canvas.height);
+      gl.uniform1f(uTime,  (performance.now() - t0) / 1000);
+      gl.uniform2f(uMove,  moveDX, moveDY);
+      gl.uniform2f(uTouch, mouseX, mouseY);
+      gl.uniform1i(uPtrs,  0);
+      moveDX = 0; moveDY = 0;
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      requestAnimationFrame(render);
+    })();
+  })();
+
+  /* ── Submit loading state ───────────────────────────────────────────── */
+  (function () {
+    var form = document.getElementById('login-form');
+    var btn  = document.getElementById('submit-btn');
+    if (!form || !btn) return;
+    form.addEventListener('submit', function () {
+      btn.textContent = 'Authenticating…';
+      btn.disabled = true;
+    });
+  })();
+  </script>
+
+</body>
+</html>

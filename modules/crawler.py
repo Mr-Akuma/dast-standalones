@@ -13,6 +13,8 @@ from urllib.parse import parse_qs, urljoin, urlparse, urlencode
 
 import requests
 import requests.exceptions
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from .scope import ScopeManager
 
@@ -190,6 +192,31 @@ class Crawler:
     def stop(self):
         self._stop = True
 
+    def _fetch(self, url: str) -> requests.Response:
+        """Fetch a URL, retrying with Connection: close on first failure.
+
+        Some embedded devices / appliances reject HTTP/1.1 keep-alive but
+        respond normally when given Connection: close.  Raw IPs running
+        non-standard stacks (cameras, routers, IoT devices) hit this path.
+        """
+        headers = {"Accept": "text/html,application/json,*/*"}
+        try:
+            return self.session.get(
+                url, timeout=self.timeout,
+                allow_redirects=True,
+                headers=headers,
+            )
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.ChunkedEncodingError):
+            # Retry with Connection: close — helps with HTTP/1.1-unfriendly servers
+            headers["Connection"] = "close"
+            headers["User-Agent"] = "Mozilla/5.0 (compatible; DAST/2.0)"
+            return self.session.get(
+                url, timeout=self.timeout,
+                allow_redirects=True,
+                headers=headers,
+            )
+
     def crawl(self) -> SiteMap:
         """BFS crawl from target. Returns populated SiteMap."""
         queue: deque[tuple[str, int]] = deque([(self.target, 0)])
@@ -217,11 +244,7 @@ class Crawler:
             self._visited.add(url)
 
             try:
-                resp = self.session.get(
-                    url, timeout=self.timeout,
-                    allow_redirects=True,
-                    headers={"Accept": "text/html,application/json,*/*"},
-                )
+                resp = self._fetch(url)
             except Exception:
                 continue
 
@@ -294,7 +317,7 @@ class Crawler:
                 if not self.scope.in_scope(js_url):
                     continue
                 try:
-                    js_resp = self.session.get(js_url, timeout=self.timeout)
+                    js_resp = self._fetch(js_url)
                     self._extract_api_paths_from_js(js_resp.text, url)
                 except Exception:
                     pass
