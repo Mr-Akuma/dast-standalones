@@ -1,6 +1,6 @@
 """
 Nuclei-mined token and credential detection patterns.
-Extends PassiveScanner with 26 new service-specific credential checks.
+Extends PassiveScanner with 34 service-specific credential checks.
 
 These patterns are derived from nuclei security templates and cover
 infrastructure tokens, payment processors, cloud provider credentials,
@@ -9,6 +9,8 @@ encryption keys, and connection strings that passive.py does not handle.
 from __future__ import annotations
 
 import re
+
+from .industry_patterns import TOKEN_PATTERNS as _INDUSTRY_TOKEN_PATTERNS
 
 # ---------------------------------------------------------------------------
 # Pattern list: (compiled_regex, description, severity, cwe)
@@ -150,7 +152,50 @@ _NUCLEI_TOKEN_PATTERNS: list[tuple[re.Pattern, str, str, str]] = [
     (re.compile(r"""jdbc:[a-z]+://[^\s'"]{5,}\?[^\s'"]*password=[^\s&'"]+"""),
      "JDBC connection string with embedded password exposed in response",
      "High", "CWE-522"),
+
+    # ---- AWS IAM Access Key ----
+    (re.compile(r"\bAKIA[A-Z0-9]{16}\b"),
+     "AWS IAM Access Key (AKIA...) exposed in response",
+     "Critical", "CWE-522"),
+
+    # ---- AWS STS Temporary Access Key ----
+    (re.compile(r"\bASIA[A-Z0-9]{16}\b"),
+     "AWS STS Temporary Access Key (ASIA...) exposed in response",
+     "Critical", "CWE-522"),
+
+    # ---- Slack Bot Token ----
+    (re.compile(r"\bxoxb-[0-9A-Za-z\-]{50,}\b"),
+     "Slack Bot Token (xoxb-) exposed in response",
+     "High", "CWE-522"),
+
+    # ---- Slack User Token ----
+    (re.compile(r"\bxoxp-[0-9A-Za-z\-]{70,}\b"),
+     "Slack User Token (xoxp-) exposed in response",
+     "High", "CWE-522"),
+
+    # ---- Twilio API Key ----
+    (re.compile(r"\bSK[a-z0-9]{32}\b"),
+     "Twilio API Key (SK...) exposed in response",
+     "High", "CWE-522"),
+
+    # ---- Shopify Access Token ----
+    (re.compile(r"\bshpat_[a-fA-F0-9]{32}\b"),
+     "Shopify Access Token (shpat_) exposed in response",
+     "Critical", "CWE-522"),
+
+    # ---- Shopify Shared Secret ----
+    (re.compile(r"\bshpss_[a-fA-F0-9]{32}\b"),
+     "Shopify Shared Secret (shpss_) exposed in response",
+     "Critical", "CWE-522"),
+
+    # ---- Stripe Restricted Live Key ----
+    (re.compile(r"\brk_live_[a-zA-Z0-9]{24,}\b"),
+     "Stripe Restricted Live Key (rk_live_) exposed in response",
+     "Critical", "CWE-522"),
 ]
+
+
+_NUCLEI_TOKEN_PATTERNS.extend(_INDUSTRY_TOKEN_PATTERNS)
 
 
 def run_checks(
@@ -225,6 +270,23 @@ if __name__ == "__main__":
          "Azure Storage connection string"),
         ("jdbc:mysql://db.example.com:3306/app?user=root&password=s3cret",
          "JDBC with password"),
+        # ---- 8 new patterns ----
+        ("AKIA" + "A1B2C3D4E5F6G7H8",
+         "AWS IAM Access Key"),
+        ("ASIA" + "A1B2C3D4E5F6G7H8",
+         "AWS STS Temporary Access Key"),
+        ("xoxb-" + "1234567890-" * 4 + "abcdefghij",
+         "Slack Bot Token"),
+        ("xoxp-" + "1234567890-" * 6 + "abcdefghijklmnop",
+         "Slack User Token"),
+        ("SK" + "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6",
+         "Twilio API Key"),
+        ("shpat_" + "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+         "Shopify Access Token"),
+        ("shpss_" + "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+         "Shopify Shared Secret"),
+        ("rk_live_" + "abcdefghijklmnopqrstuvwx",
+         "Stripe Restricted Live Key"),
     ]
 
     passed = 0
