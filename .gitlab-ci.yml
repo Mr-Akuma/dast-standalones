@@ -1,0 +1,174 @@
+# DAST Security Scanner — GitLab CI Template
+#
+# Usage: Include this template in your .gitlab-ci.yml:
+#   include:
+#     - project: 'security/dast-standalone'
+#       file: '.gitlab-ci.yml'
+#
+# Variables:
+#   DAST_TARGET: Target URL (required)
+#   DAST_FAIL_ON: Severity threshold (critical|high|medium|low, default: high)
+#   DAST_CONFIG: Path to dast.yml config file (optional)
+#   DAST_OPENAPI: Path to OpenAPI spec (optional)
+#   DAST_AUTH_TOKEN: Bearer auth token (optional, from CI variables)
+#
+# Exit codes from scanner:
+#   0 = clean (no findings at or above threshold)
+#   1 = critical findings found
+#   2 = high findings found
+#   3 = scan error
+#
+# Customization:
+#   - Override variables at project or pipeline level
+#   - Set DAST_AUTH_TOKEN as a masked CI/CD variable for authenticated scans
+#   - Set DAST_OPENAPI to point to your spec for API-aware scanning
+#   - Adjust DAST_FAIL_ON to control pipeline pass/fail threshold
+
+stages:
+  - dast
+
+# ---------------------------------------------------------------------------
+# Default variables — override in your project's CI/CD settings or pipeline
+# ---------------------------------------------------------------------------
+variables:
+  DAST_TARGET: ""                  # REQUIRED: Target URL to scan
+  DAST_FAIL_ON: "high"            # Severity threshold: critical|high|medium|low
+  DAST_CONFIG: ""                 # Optional: path to dast.yml config file
+  DAST_OPENAPI: ""                # Optional: path or URL to OpenAPI/Swagger spec
+  DAST_AUTH_TOKEN: ""             # Optional: bearer token for authenticated scanning
+  DAST_EXTRA_ARGS: ""             # Optional: additional CLI arguments
+
+# ---------------------------------------------------------------------------
+# DAST Scan Job
+# ---------------------------------------------------------------------------
+dast_scan:
+  stage: dast
+  image: python:3.11-slim
+
+  # Install scanner dependencies
+  before_script:
+    - pip install --quiet -r requirements.txt
+
+  script:
+    - |
+      # Validate required variables
+      if [ -z "$DAST_TARGET" ]; then
+        echo "ERROR: DAST_TARGET variable is not set. Provide the target URL to scan."
+        exit 3
+      fi
+
+      # Build the scan command
+      SCAN_CMD="python3 cli.py scan"
+      SCAN_CMD="$SCAN_CMD --target $DAST_TARGET"
+      SCAN_CMD="$SCAN_CMD --fail-on $DAST_FAIL_ON"
+      SCAN_CMD="$SCAN_CMD --output-sarif report.sarif"
+      SCAN_CMD="$SCAN_CMD --output results.json"
+
+      # Optional: config file
+      if [ -n "$DAST_CONFIG" ]; then
+        SCAN_CMD="$SCAN_CMD --config $DAST_CONFIG"
+      fi
+
+      # Optional: OpenAPI spec for API-aware scanning
+      if [ -n "$DAST_OPENAPI" ]; then
+        SCAN_CMD="$SCAN_CMD --openapi $DAST_OPENAPI"
+      fi
+
+      # Optional: authenticated scanning via bearer token
+      if [ -n "$DAST_AUTH_TOKEN" ]; then
+        SCAN_CMD="$SCAN_CMD --auth-token $DAST_AUTH_TOKEN"
+      fi
+
+      # Optional: extra CLI arguments
+      if [ -n "$DAST_EXTRA_ARGS" ]; then
+        SCAN_CMD="$SCAN_CMD $DAST_EXTRA_ARGS"
+      fi
+
+      echo "[DAST] Running: $SCAN_CMD"
+
+      # Run scan and capture exit code (|| true prevents pipeline abort)
+      set +e
+      eval $SCAN_CMD
+      SCAN_EXIT=$?
+      set -e
+
+      echo "[DAST] Scanner exited with code: $SCAN_EXIT"
+
+      # Generate JUnit XML for GitLab test reporting
+      python3 -c "
+      import json, sys
+      sys.path.insert(0, '.')
+      try:
+          from modules.cicd import JunitReport
+          with open('results.json') as f:
+              data = json.load(f)
+          findings = data.get('findings', data if isinstance(data, list) else [])
+          count = JunitReport().generate(findings, 'junit.xml')
+          print(f'[DAST] JUnit report: {count} findings written')
+      except FileNotFoundError:
+          print('[DAST] No scan results — generating empty JUnit report')
+          try:
+              JunitReport().generate([], 'junit.xml')
+          except Exception:
+              pass
+      except ImportError:
+          print('[DAST] JUnit module not available — skipping')
+      "
+
+      # Evaluate exit code and fail pipeline appropriately
+      # Exit code 0 = clean scan, no findings above threshold
+      # Exit code 1 = critical findings — always fail pipeline
+      # Exit code 2 = high findings — fail if threshold is high or lower
+      # Exit code 3 = scan error — fail pipeline
+      if [ "$SCAN_EXIT" -eq 0 ]; then
+        echo "[DAST] Scan passed — no findings at or above '$DAST_FAIL_ON' severity"
+        exit 0
+      elif [ "$SCAN_EXIT" -eq 1 ]; then
+        echo "[DAST] CRITICAL findings detected — failing pipeline"
+        exit 1
+      elif [ "$SCAN_EXIT" -eq 2 ]; then
+        echo "[DAST] HIGH findings detected — failing pipeline (threshold: $DAST_FAIL_ON)"
+        exit 1
+      elif [ "$SCAN_EXIT" -eq 3 ]; then
+        echo "[DAST] Scan error occurred — failing pipeline"
+        exit 1
+      else
+        echo "[DAST] Unexpected exit code $SCAN_EXIT — failing pipeline"
+        exit 1
+      fi
+
+  # Artifacts: reports + security dashboard integration
+  artifacts:
+    when: always
+    paths:
+      - report.sarif
+      - results.json
+      - junit.xml
+    reports:
+      # GitLab Security Dashboard integration (SAST report format)
+      sast: report.sarif
+      # JUnit test results show in merge request "Tests" tab
+      junit: junit.xml
+    expire_in: 30 days
+
+  # Allow failure on exit code 2 (high findings below threshold)
+  # This lets the MR proceed with a warning instead of blocking
+  allow_failure:
+    exit_codes:
+      - 2
+
+  # Run on merge requests and pushes to default branch only
+  # Customize these rules to match your branching strategy
+  rules:
+    # Run on merge request pipelines
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: always
+    # Run on pushes to the default branch (main/master)
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: always
+    # Allow manual trigger from any branch
+    - when: manual
+      allow_failure: true
+
+  # Timeout: DAST scans can take time depending on target size
+  timeout: 30 minutes

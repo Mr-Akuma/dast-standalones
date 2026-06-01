@@ -329,3 +329,89 @@ class OpenAPIImporter:
 def import_openapi(source, base_url: str = "") -> list[InputSurface]:
     """Load and parse an OpenAPI/Swagger spec. Returns InputSurface list."""
     return OpenAPIImporter(base_url=base_url).import_from_source(source)
+
+
+# ── RequestDescriptor — composable request fragment ───────────────────────────
+
+class RequestDescriptor:
+    """
+    Composable representation of an HTTP request extracted from any spec format.
+    Mirrors Burp Suite Montoya's RequestDescriptor / Endpoint pattern.
+
+    Used as a common intermediate form when importing requests from multiple
+    sources (OpenAPI, Postman, SOAP WSDL).  Call to_input_surfaces() to
+    get fuzzer-ready InputSurface objects.
+
+    Fields:
+        host:       Base URL (scheme + host + port), e.g. "https://api.example.com"
+        path:       Request path, e.g. "/v2/users/{id}"
+        method:     HTTP verb, e.g. "POST"
+        params:     List of {"name": ..., "in": ..., "example": ...} dicts
+        body:       Raw body string (JSON/form template)
+        auth_type:  Detected auth type: "bearer", "apiKey", "basic", "none"
+        headers:    Dict of additional request headers
+    """
+    __slots__ = ("host", "path", "method", "params", "body", "auth_type", "headers")
+
+    def __init__(
+        self,
+        host:      str = "",
+        path:      str = "/",
+        method:    str = "GET",
+        params:    Optional[list] = None,
+        body:      str = "",
+        auth_type: str = "none",
+        headers:   Optional[dict] = None,
+    ):
+        self.host      = host
+        self.path      = path
+        self.method    = method.upper()
+        self.params    = params or []
+        self.body      = body
+        self.auth_type = auth_type
+        self.headers   = headers or {}
+
+    def to_input_surfaces(self) -> list[InputSurface]:
+        """Convert this descriptor to a list of fuzzer-ready InputSurface objects."""
+        base = f"{self.host.rstrip('/')}{self.path}"
+        surfaces = []
+        for p in self.params:
+            loc   = p.get("in", "query")
+            ptype = {"query": "query", "path": "path",
+                     "header": "header", "cookie": "cookie"}.get(loc, "query")
+            surfaces.append(InputSurface(
+                url=base, method=self.method, param=p.get("name", ""),
+                param_type=ptype, original_value=str(p.get("example", "test")),
+                headers=self.headers,
+            ))
+        return surfaces
+
+    def __repr__(self) -> str:
+        return f"<RequestDescriptor {self.method} {self.host}{self.path}>"
+
+
+# ── Postman convenience ───────────────────────────────────────────────────────
+
+def from_postman(
+    source,
+    env:      Optional[dict] = None,
+    base_url: str = "",
+) -> list[InputSurface]:
+    """
+    Load a Postman collection and return fuzzer-ready InputSurface objects.
+
+    Args:
+        source:   File path or parsed dict of a Postman Collection v2.0/v2.1
+        env:      Optional dict of Postman environment variables
+        base_url: Override base URL (if Postman collection has placeholder hosts)
+
+    Returns:
+        List of InputSurface objects covering every request × parameter combination.
+    """
+    from .postman_importer import PostmanImporter
+    importer = PostmanImporter()
+    requests_list = importer.load_collection(source, env=env or {})
+    surfaces: list[InputSurface] = []
+    for req in requests_list:
+        surfaces.extend(req.to_input_surfaces(base_url=base_url))
+    return surfaces

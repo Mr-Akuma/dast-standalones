@@ -1,0 +1,52 @@
+{
+  "payloads": {
+    "custom_runtime_probe": [
+      "DAST_CUSTOM_PAYLOAD"
+    ]
+  },
+  "detectors": {
+    "custom_runtime_probe": [
+      [
+        "DAST_CUSTOM_SIGNAL",
+        "Custom runtime detector fired"
+      ]
+    ]
+  },
+  "param_name_rules": [
+    {
+      "pattern": "(?i)(?:^|_|-)custom_sink(?:$|_|-)",
+      "types": [
+        "custom_runtime_probe"
+      ]
+    }
+  ],
+  "api_ssrf_url_params": [
+    "custom_callback_url"
+  ],
+  "api_webhook_ssrf_payloads": [
+    "http://169.254.169.254/latest/meta-data/"
+  ],
+  "api_hidden_endpoints": [
+    "/api/custom/internal"
+  ],
+  "llm_extra_paths": [
+    "/api/custom/analyze"
+  ],
+  "upload_probes": [
+    {
+      "filename": "custom-polyglot.gif.php",
+      "content": "GIF89a\n<?php echo 'dast-custom-polyglot'; ?>",
+      "content_type": "image/gif",
+      "description": "Custom safe polyglot upload probe",
+      "requires_execution": true
+    }
+  ],
+  "token_patterns": [
+    {
+      "pattern": "\\bcustom_live_[A-Za-z0-9]{32,}\\b",
+      "finding": "Custom live API token exposed in response",
+      "severity": "High",
+      "cwe": "CWE-522"
+    }
+  ]
+}

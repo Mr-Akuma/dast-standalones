@@ -1,0 +1,845 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SecureScan DAST — Enterprise Security Testing</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0b0f19;
+      --bg-light: #0f1423;
+      --green: #10b981;
+      --green-hover: #059669;
+      --green-glow: rgba(16, 185, 129, 0.15);
+      --text: #ffffff;
+      --text-secondary: #9ca3af;
+      --text-muted: #6b7280;
+      --card-bg: rgba(255,255,255,0.05);
+      --card-border: rgba(255,255,255,0.1);
+      --nav-bg: rgba(11,15,25,0.8);
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      line-height: 1.6;
+      overflow-x: hidden;
+    }
+
+    /* ── Background Gradient ─────────────────────────────────────── */
+    .bg-glow {
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      pointer-events: none;
+      background:
+        radial-gradient(ellipse 80% 60% at 50% 40%, rgba(16,185,129,0.07) 0%, transparent 70%),
+        radial-gradient(ellipse 60% 50% at 30% 50%, rgba(6,95,70,0.05) 0%, transparent 60%),
+        radial-gradient(ellipse 40% 40% at 70% 30%, rgba(16,185,129,0.04) 0%, transparent 50%);
+    }
+
+    /* ── Navigation ──────────────────────────────────────────────── */
+    .nav {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 64px;
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 40px;
+      background: var(--nav-bg);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+
+    .nav-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      text-decoration: none;
+    }
+
+    .nav-logo svg {
+      width: 28px;
+      height: 28px;
+    }
+
+    .nav-logo-text {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .nav-logo-text span {
+      color: var(--green);
+    }
+
+    .nav-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-family: inherit;
+      font-size: 14px;
+      font-weight: 600;
+      padding: 8px 20px;
+      border-radius: 8px;
+      text-decoration: none;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      border: none;
+    }
+
+    .btn-ghost {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid rgba(255,255,255,0.2);
+    }
+
+    .btn-ghost:hover {
+      border-color: rgba(255,255,255,0.4);
+      background: rgba(255,255,255,0.05);
+    }
+
+    .btn-primary {
+      background: var(--green);
+      color: #fff;
+      border: 1px solid transparent;
+    }
+
+    .btn-primary:hover {
+      background: var(--green-hover);
+    }
+
+    .btn-outline-green {
+      background: transparent;
+      color: var(--green);
+      border: 1px solid var(--green);
+    }
+
+    .btn-outline-green:hover {
+      background: rgba(16,185,129,0.1);
+    }
+
+    .btn-lg {
+      font-size: 16px;
+      padding: 14px 32px;
+      border-radius: 10px;
+    }
+
+    .btn-icon {
+      width: 16px;
+      height: 16px;
+    }
+
+    /* ── Hero Section ────────────────────────────────────────────── */
+    .hero {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      position: relative;
+      z-index: 1;
+      padding: 64px 0 0 0;
+    }
+
+    .hero-inner {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 60px;
+      align-items: center;
+      width: 100%;
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 0 60px;
+    }
+
+    .hero-content {
+      animation: fadeInLeft 0.8s ease-out both;
+      max-width: 560px;
+      position: relative;
+      z-index: 3;
+    }
+
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(16,185,129,0.1);
+      border: 1px solid rgba(16,185,129,0.3);
+      color: var(--green);
+      padding: 6px 16px;
+      border-radius: 100px;
+      font-size: 13px;
+      font-weight: 500;
+    }
+
+    .hero-badge svg {
+      width: 14px;
+      height: 14px;
+    }
+
+    .hero-heading {
+      font-size: 56px;
+      font-weight: 800;
+      line-height: 1.1;
+      margin-top: 24px;
+      letter-spacing: -0.02em;
+    }
+
+    .hero-heading .accent {
+      color: var(--green);
+    }
+
+    .hero-subtitle {
+      font-size: 18px;
+      line-height: 1.7;
+      color: var(--text-secondary);
+      margin-top: 24px;
+      max-width: 520px;
+    }
+
+    .hero-cta {
+      display: flex;
+      gap: 16px;
+      margin-top: 40px;
+    }
+
+    /* ── Hero Visual (right column) ──────────────────────────────── */
+    .hero-visual {
+      position: relative;
+      animation: fadeInRight 0.8s ease-out 0.2s both;
+    }
+
+    .hero-illustration {
+      width: 100%;
+      max-width: 580px;
+      height: auto;
+      position: relative;
+      z-index: 2;
+      border-radius: 16px;
+      filter: drop-shadow(0 25px 50px rgba(0,0,0,0.5)) drop-shadow(0 0 60px rgba(16,185,129,0.08));
+    }
+
+    /* ── Floating Shapes ─────────────────────────────────────────── */
+    .float-shape {
+      position: absolute;
+      border-radius: 50%;
+      opacity: 0.12;
+      z-index: 1;
+    }
+
+    .float-shape-1 {
+      width: 200px;
+      height: 200px;
+      background: radial-gradient(circle, var(--green) 0%, transparent 70%);
+      top: -40px;
+      right: -60px;
+      animation: floatSlow 8s ease-in-out infinite;
+    }
+
+    .float-shape-2 {
+      width: 120px;
+      height: 120px;
+      background: radial-gradient(circle, #60a5fa 0%, transparent 70%);
+      bottom: -30px;
+      left: -40px;
+      animation: floatSlow 6s ease-in-out infinite reverse;
+    }
+
+    .float-shape-3 {
+      width: 80px;
+      height: 80px;
+      background: radial-gradient(circle, var(--green) 0%, transparent 70%);
+      top: 50%;
+      right: -30px;
+      animation: floatSlow 7s ease-in-out infinite;
+    }
+
+    /* ── Floating Badges ─────────────────────────────────────────── */
+    .floating-badge {
+      position: absolute;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(11,15,25,0.9);
+      border: 1px solid rgba(255,255,255,0.1);
+      padding: 10px 16px;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text);
+      z-index: 3;
+      backdrop-filter: blur(10px);
+      box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+    }
+
+    .floating-badge svg {
+      width: 18px;
+      height: 18px;
+      color: var(--green);
+      flex-shrink: 0;
+    }
+
+    .fb-1 {
+      top: 10px;
+      right: -20px;
+      animation: floatBadge 3s ease-in-out infinite;
+    }
+
+    .fb-2 {
+      top: 50%;
+      right: -40px;
+      transform: translateY(-50%);
+      animation: floatBadge 3s ease-in-out 0.5s infinite;
+    }
+
+    .fb-3 {
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      animation: floatBadge 3s ease-in-out 1s infinite;
+    }
+
+    /* ── Features Section ────────────────────────────────────────── */
+    .section {
+      position: relative;
+      z-index: 1;
+      padding: 100px 60px;
+    }
+
+    .section-inner {
+      max-width: 1280px;
+      margin: 0 auto;
+    }
+
+    .section-title {
+      font-size: 40px;
+      font-weight: 700;
+      text-align: center;
+      margin-bottom: 16px;
+      letter-spacing: -0.02em;
+    }
+
+    .section-subtitle {
+      font-size: 18px;
+      color: var(--text-secondary);
+      text-align: center;
+      margin-bottom: 64px;
+      max-width: 560px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+
+    .features-bg {
+      background: var(--bg-light);
+    }
+
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 24px;
+    }
+
+    .feature-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 32px;
+      transition: all 0.3s ease;
+    }
+
+    .feature-card:hover {
+      transform: translateY(-2px) scale(1.02);
+      border-color: rgba(16,185,129,0.3);
+      box-shadow: 0 8px 32px rgba(16,185,129,0.08);
+    }
+
+    .feature-icon {
+      width: 48px;
+      height: 48px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(16,185,129,0.1);
+      border: 1px solid rgba(16,185,129,0.2);
+      border-radius: 12px;
+      font-size: 22px;
+      margin-bottom: 20px;
+    }
+
+    .feature-card h3 {
+      font-size: 18px;
+      font-weight: 600;
+      margin-bottom: 10px;
+    }
+
+    .feature-card p {
+      font-size: 14px;
+      line-height: 1.6;
+      color: var(--text-secondary);
+    }
+
+    /* ── Stats Section ───────────────────────────────────────────── */
+    .stats-bar {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 32px;
+      text-align: center;
+      padding: 60px 0;
+      border-top: 1px solid rgba(255,255,255,0.06);
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+
+    .stat-number {
+      font-size: 42px;
+      font-weight: 800;
+      color: var(--green);
+      letter-spacing: -0.02em;
+    }
+
+    .stat-label {
+      font-size: 14px;
+      color: var(--text-secondary);
+      margin-top: 4px;
+      font-weight: 500;
+    }
+
+    /* ── CTA Section ─────────────────────────────────────────────── */
+    .cta-section {
+      text-align: center;
+      padding: 120px 60px;
+    }
+
+    .cta-section h2 {
+      font-size: 44px;
+      font-weight: 700;
+      margin-bottom: 16px;
+      letter-spacing: -0.02em;
+    }
+
+    .cta-section p {
+      font-size: 18px;
+      color: var(--text-secondary);
+      margin-bottom: 40px;
+      max-width: 480px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+
+    /* ── Footer ──────────────────────────────────────────────────── */
+    .footer {
+      position: relative;
+      z-index: 1;
+      text-align: center;
+      padding: 40px 60px;
+      border-top: 1px solid rgba(255,255,255,0.06);
+      color: var(--text-muted);
+      font-size: 13px;
+    }
+
+    /* ── Made with Emergent Badge ────────────────────────────────── */
+    .emergent-badge {
+      position: fixed;
+      bottom: 16px;
+      right: 16px;
+      z-index: 200;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(11,15,25,0.9);
+      border: 1px solid rgba(255,255,255,0.1);
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 11px;
+      color: var(--text-muted);
+      backdrop-filter: blur(10px);
+      text-decoration: none;
+      transition: all 0.2s ease;
+    }
+
+    .emergent-badge:hover {
+      border-color: rgba(16,185,129,0.3);
+      color: var(--text-secondary);
+    }
+
+    .emergent-badge svg {
+      width: 12px;
+      height: 12px;
+      color: var(--green);
+    }
+
+    /* ── Animations ──────────────────────────────────────────────── */
+    @keyframes fadeInLeft {
+      from { opacity: 0; transform: translateX(-30px); }
+      to   { opacity: 1; transform: translateX(0); }
+    }
+
+    @keyframes fadeInRight {
+      from { opacity: 0; transform: translateX(30px); }
+      to   { opacity: 1; transform: translateX(0); }
+    }
+
+    @keyframes fadeInUp {
+      from { opacity: 0; transform: translateY(20px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    @keyframes typeLine {
+      from { opacity: 0; transform: translateX(-8px); }
+      to   { opacity: 1; transform: translateX(0); }
+    }
+
+    @keyframes floatBadge {
+      0%, 100% { transform: translateY(0); }
+      50%      { transform: translateY(-8px); }
+    }
+
+    @keyframes floatSlow {
+      0%, 100% { transform: translate(0, 0); }
+      50%      { transform: translate(10px, -10px); }
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 0.6; }
+      50%      { opacity: 1; }
+    }
+
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50%      { opacity: 0; }
+    }
+
+    .cursor-blink {
+      animation: blink 1s step-end infinite;
+      color: var(--green);
+    }
+
+    /* ── Responsive ──────────────────────────────────────────────── */
+    @media (max-width: 1024px) {
+      .hero-heading { font-size: 44px; }
+      .section-title { font-size: 32px; }
+      .cta-section h2 { font-size: 36px; }
+    }
+
+    @media (max-width: 768px) {
+      .nav { padding: 0 20px; }
+      .nav-logo-text { font-size: 16px; }
+
+      .hero-inner {
+        grid-template-columns: 1fr;
+        padding: 0 24px;
+        gap: 40px;
+      }
+
+      .hero-visual { display: none; }
+
+      .hero-content {
+        text-align: center;
+        padding-top: 40px;
+      }
+
+      .hero-heading { font-size: 36px; }
+
+      .hero-subtitle {
+        font-size: 16px;
+        margin-left: auto;
+        margin-right: auto;
+      }
+
+      .hero-cta {
+        justify-content: center;
+        flex-wrap: wrap;
+      }
+
+
+      .section { padding: 60px 24px; }
+
+      .features-grid {
+        grid-template-columns: 1fr;
+        gap: 16px;
+      }
+
+      .stats-bar {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 24px;
+      }
+
+      .stat-number { font-size: 32px; }
+
+      .cta-section {
+        padding: 80px 24px;
+      }
+
+      .cta-section h2 { font-size: 28px; }
+
+      .footer { padding: 30px 24px; }
+    }
+
+    @media (max-width: 480px) {
+      .hero-heading { font-size: 28px; }
+      .btn-lg { padding: 12px 24px; font-size: 15px; }
+      .nav-actions .btn { padding: 6px 14px; font-size: 13px; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- Background glow -->
+<div class="bg-glow"></div>
+
+<!-- Navigation -->
+<nav class="nav">
+  <a href="/login2" class="nav-logo">
+    <svg viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+    </svg>
+    <span class="nav-logo-text">Secure<span>Scan</span> DAST</span>
+  </a>
+  <div class="nav-actions">
+    <a href="/login" class="btn btn-ghost">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+        <circle cx="12" cy="7" r="4"/>
+      </svg>
+      Sign In
+    </a>
+    <a href="/login" class="btn btn-primary">Get Started</a>
+  </div>
+</nav>
+
+<!-- Hero Section -->
+<section class="hero">
+  <div class="hero-inner">
+    <div class="hero-content">
+      <div class="hero-badge">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="20 6 9 17 4 12"/>
+        </svg>
+        Enterprise-Grade Security Testing
+      </div>
+
+      <h1 class="hero-heading">
+        Protect Your<br>
+        Applications with<br>
+        <span class="accent">Advanced DAST</span>
+      </h1>
+
+      <p class="hero-subtitle">
+        Identify vulnerabilities in real-time with our cutting-edge Dynamic
+        Application Security Testing platform. Comprehensive scanning,
+        instant threat detection, and actionable insights to secure your
+        digital assets.
+      </p>
+
+      <div class="hero-cta">
+        <a href="/login" class="btn btn-primary btn-lg">
+          Start Free Trial
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="5" y1="12" x2="19" y2="12"/>
+            <polyline points="12 5 19 12 12 19"/>
+          </svg>
+        </a>
+        <a href="/login" class="btn btn-outline-green btn-lg">
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="5 3 19 12 5 21 5 3"/>
+          </svg>
+          Watch Demo
+        </a>
+      </div>
+    </div>
+
+    <div class="hero-visual">
+      <!-- Floating glow shapes -->
+      <div class="float-shape float-shape-1"></div>
+      <div class="float-shape float-shape-2"></div>
+      <div class="float-shape float-shape-3"></div>
+
+      <!-- Character illustration (cropped from Figma) -->
+      <img
+        src="{{ url_for('static', filename='img/hero-character.png') }}"
+        alt="Cybersecurity professional monitoring security dashboards"
+        class="hero-illustration"
+        loading="eager"
+      />
+
+      <!-- Floating badges -->
+      <div class="floating-badge fb-1">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+          <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+        </svg>
+        Real-time Protection
+      </div>
+      <div class="floating-badge fb-2">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"/>
+          <circle cx="12" cy="12" r="6"/>
+          <circle cx="12" cy="12" r="2"/>
+        </svg>
+        Threat Analysis
+      </div>
+      <div class="floating-badge fb-3">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="8"/>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+        Deep Scanning
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Features Section -->
+<section class="section features-bg">
+  <div class="section-inner">
+    <h2 class="section-title">Everything You Need to Stay Secure</h2>
+    <p class="section-subtitle">
+      Comprehensive security testing tools designed to protect your applications from modern threats.
+    </p>
+
+    <div class="features-grid">
+      <div class="feature-card">
+        <div class="feature-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+            <polyline points="9 12 11 14 15 10"/>
+          </svg>
+        </div>
+        <h3>60+ Security Checks</h3>
+        <p>Comprehensive vulnerability detection covering XSS, SQLi, CSRF, SSRF, and dozens more attack vectors.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2a10 10 0 1 0 10 10"/>
+            <path d="M12 2v10l6.93 4"/>
+          </svg>
+        </div>
+        <h3>AI-Powered Scanning</h3>
+        <p>Intelligent crawling engine that discovers hidden endpoints and maps your entire application surface.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+            <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+          </svg>
+        </div>
+        <h3>Real-time Alerts</h3>
+        <p>Instant notifications when vulnerabilities are discovered, with severity classification and remediation guidance.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="7" height="7"/>
+            <rect x="14" y="3" width="7" height="7"/>
+            <rect x="14" y="14" width="7" height="7"/>
+            <rect x="3" y="14" width="7" height="7"/>
+          </svg>
+        </div>
+        <h3>OWASP Top 10</h3>
+        <p>Full coverage of OWASP Top 10 vulnerabilities ensuring compliance with industry security standards.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/>
+          </svg>
+        </div>
+        <h3>CI/CD Integration</h3>
+        <p>Seamlessly integrate security testing into your development pipeline with API-first architecture.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+            <line x1="16" y1="13" x2="8" y2="13"/>
+            <line x1="16" y1="17" x2="8" y2="17"/>
+            <polyline points="10 9 9 9 8 9"/>
+          </svg>
+        </div>
+        <h3>Detailed Reports</h3>
+        <p>Generate comprehensive security reports with evidence, impact analysis, and step-by-step remediation.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Stats Section -->
+<section class="section">
+  <div class="section-inner">
+    <div class="stats-bar">
+      <div>
+        <div class="stat-number">60+</div>
+        <div class="stat-label">Vulnerability Checks</div>
+      </div>
+      <div>
+        <div class="stat-number">&lt; 5min</div>
+        <div class="stat-label">Average Scan Time</div>
+      </div>
+      <div>
+        <div class="stat-number">99.9%</div>
+        <div class="stat-label">Detection Accuracy</div>
+      </div>
+      <div>
+        <div class="stat-number">Zero</div>
+        <div class="stat-label">Configuration Needed</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- CTA Section -->
+<section class="section cta-section">
+  <h2>Ready to Secure Your Application?</h2>
+  <p>Start scanning for vulnerabilities in minutes. No credit card required.</p>
+  <a href="/login" class="btn btn-primary btn-lg">
+    Start Free Trial
+    <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <line x1="5" y1="12" x2="19" y2="12"/>
+      <polyline points="12 5 19 12 12 19"/>
+    </svg>
+  </a>
+</section>
+
+<!-- Footer -->
+<footer class="footer">
+  &copy; 2026 SecureScan DAST. All rights reserved.
+</footer>
+
+<!-- Made with Emergent badge -->
+<a href="#" class="emergent-badge">
+  <svg viewBox="0 0 24 24" fill="currentColor">
+    <path d="M13 3L4 14h7l-2 7 9-11h-7l2-7z"/>
+  </svg>
+  Made with Emergent
+</a>
+
+</body>
+</html>

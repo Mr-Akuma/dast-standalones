@@ -472,6 +472,58 @@ def _check_apostrophe_cms(url: str, b: str, h: dict, findings: list[dict]) -> No
         ))
 
 
+def _check_spring4shell(url: str, b: str, h: dict, findings: list[dict]) -> None:
+    """26. Spring4Shell CVE-2022-22965 — ClassLoader RCE indicator -- CWE-78."""
+    indicators = (
+        "class.module.classLoader",
+        "spring.version",
+        "org.springframework",
+    )
+    error_patterns = (
+        "PropertyAccessException",
+        "BeanInstantiationException",
+        "Invalid property",
+    )
+    if any(ind in b for ind in indicators) and any(err in b for err in error_patterns):
+        findings.append(_finding(
+            url,
+            "cve_indicator",
+            "Spring4Shell (CVE-2022-22965) RCE indicator detected",
+            "Critical",
+            f"Response contains Spring ClassLoader chain + error pattern",
+            "Patch Spring Framework to >= 5.3.18 / 5.2.20; upgrade to JDK 9+",
+            "CWE-78",
+        ))
+
+
+def _check_text4shell(url: str, b: str, h: dict, findings: list[dict]) -> None:
+    """27. Text4Shell CVE-2022-42889 — Commons Text interpolation RCE indicator -- CWE-78."""
+    indicators = (
+        "${script:",
+        "${url:",
+        "${dns:",
+        "commons-text",
+        "StringSubstitutor",
+        "StringLookup",
+    )
+    error_patterns = (
+        "ScriptStringLookup",
+        "DnsStringLookup",
+        "UrlStringLookup",
+        "IllegalArgumentException",
+    )
+    if any(ind in b for ind in indicators) and any(err in b for err in error_patterns):
+        findings.append(_finding(
+            url,
+            "cve_indicator",
+            "Text4Shell (CVE-2022-42889) RCE indicator detected",
+            "Critical",
+            f"Response contains Commons Text interpolation marker + error pattern",
+            "Upgrade Apache Commons Text to >= 1.10.0",
+            "CWE-78",
+        ))
+
+
 # ---------------------------------------------------------------------------
 # Ordered list of all check functions
 # ---------------------------------------------------------------------------
@@ -506,6 +558,9 @@ _ALL_CHECKS = [
     _check_bamboo_ci,
     _check_blazor_wasm,
     _check_apostrophe_cms,
+    # Group 5 -- CVE Indicators
+    _check_spring4shell,
+    _check_text4shell,
 ]
 
 

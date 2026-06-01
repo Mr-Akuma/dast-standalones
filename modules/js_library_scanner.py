@@ -128,7 +128,7 @@ def _load_retirejs_db() -> Tuple[Dict[str, dict], int, int]:
     if not os.path.isfile(db_path):
         return {}, 0, 0
 
-    with open(db_path, "r") as f:
+    with open(db_path, "r", encoding="utf-8") as f:
         raw = json.load(f)
 
     db: Dict[str, dict] = {}

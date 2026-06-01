@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urljoin
 
+import re
+
 import requests
 import requests.exceptions
 
@@ -36,22 +38,46 @@ _FALLBACK_WORDLIST: list[str] = [
 
 # Available category wordlists (loaded on demand)
 WORDLIST_CATEGORIES: dict[str, str] = {
-    "common":       "common.txt",          # Full combined list (41K+)
-    "admin":        "admin-panels.txt",
-    "api":          "api-endpoints.txt",
-    "auth":         "auth-session.txt",
-    "backup":       "backup-files.txt",
-    "cloud":        "cloud-infra.txt",
-    "cms":          "cms-platforms.txt",
-    "config":       "config-secrets.txt",
-    "database":     "database-tools.txt",
-    "debug":        "dev-debug.txt",
-    "dirs":         "common-dirs.txt",
-    "extended":     "extended-paths.txt",
-    "files":        "common-files.txt",
-    "frameworks":   "frameworks.txt",
-    "security":     "security-scanpaths.txt",
-    "vcs":          "vcs-cicd.txt",
+    # ── Original curated lists ─────────────────────────────────────────────
+    "common":             "common.txt",            # Full combined list (47K+)
+    "admin":              "admin-panels.txt",
+    "api":                "api-endpoints.txt",
+    "auth":               "auth-session.txt",
+    "backup":             "backup-files.txt",
+    "cloud":              "cloud-infra.txt",
+    "cms":                "cms-platforms.txt",
+    "config":             "config-secrets.txt",
+    "database":           "database-tools.txt",
+    "debug":              "dev-debug.txt",
+    "dirs":               "common-dirs.txt",
+    "extended":           "extended-paths.txt",
+    "files":              "common-files.txt",
+    "frameworks":         "frameworks.txt",
+    "security":           "security-scanpaths.txt",
+    "vcs":                "vcs-cicd.txt",
+
+    # ── Proviesec/directory-files-payload-lists ────────────────────────────
+    "proviesec-admin":    "proviesec-admin.txt",    # 1441 admin panel paths
+    "proviesec-best":     "proviesec-best.txt",     # 701 hand-curated high-signal paths
+    "proviesec-full":     "proviesec-full.txt",     # 189K comprehensive combined list
+    "swagger":            "proviesec-swagger.txt",   # API docs endpoints (/swagger, /openapi, etc.)
+    "docker":             "proviesec-docker.txt",    # Docker/container exposed paths
+    "git":                "proviesec-git.txt",       # Git repo exposures (.git, etc.)
+    "grafana":            "proviesec-grafana.txt",   # Grafana dashboard paths
+    "log":                "proviesec-log.txt",       # Log file locations
+    "phpinfo":            "proviesec-phpinfo.txt",   # PHP info page variants
+    "phpmyadmin":         "proviesec-phpmyadmin.txt",# phpMyAdmin paths (144 entries)
+    "stats":              "proviesec-stats.txt",     # Analytics/stats panel paths
+    "proviesec-backup":   "proviesec-backup.txt",    # Backup file paths
+    "proviesec-config":   "proviesec-config.txt",    # Config file paths
+    "upload":             "proviesec-upload.txt",    # File upload endpoints
+
+    # ── daviddias/node-dirbuster (classic DirBuster lists) ─────────────────
+    "dirbuster-medium":   "dirbuster-medium.txt",   # 220K paths — thorough scan
+    "dirbuster-small":    "dirbuster-small.txt",    # 87K paths — balanced speed/coverage
+
+    # ── six2dez/OneListForAll ──────────────────────────────────────────────
+    "olfa-micro":         "onelistforall-micro.txt", # 37K curated low-hanging-fruit paths
 }
 
 
@@ -123,7 +149,7 @@ def available_wordlists(wordlist_dir: Path | None = None) -> dict[str, int]:
     for name, filename in WORDLIST_CATEGORIES.items():
         fp = wdir / filename
         if fp.exists():
-            with open(fp, "r") as f:
+            with open(fp, "r", encoding="utf-8", errors="ignore") as f:
                 available[name] = sum(1 for line in f if line.strip())
     return available
 
@@ -167,6 +193,41 @@ class ForcedBrowser:
     """
 
     INTERESTING_STATUS = {200, 201, 204, 206, 301, 302, 307, 308, 400, 401, 403, 405, 500, 503}
+
+    # Backup / config file extensions that indicate sensitive file exposure
+    _BACKUP_EXTENSIONS = (
+        ".bak", ".backup", ".old", ".orig", ".save", ".swp", ".swo",
+        ".tmp", ".temp", ".copy", ".dist",
+        "~",        # vim backup
+        ".DS_Store",
+        # Archive formats
+        ".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".gz", ".rar", ".7z",
+        # Database dumps
+        ".sql", ".sql.gz", ".dump", ".db", ".sqlite", ".mdb",
+        # Config files
+        ".conf", ".cfg", ".ini", ".yml", ".yaml", ".toml",
+        ".env", ".env.local", ".env.production", ".env.staging",
+        # Source control
+        ".git", ".svn", ".hg",
+        # Editor/IDE
+        ".idea", ".vscode", ".swp", ".swo", ".un~",
+        # Logs
+        ".log", ".log.1", ".access.log", ".error.log",
+    )
+
+    _CONFIG_PATTERNS = re.compile(
+        r"(?:^|/)"
+        r"(?:web\.config|\.htaccess|\.htpasswd|php\.ini|"
+        r"config\.php|database\.yml|settings\.py|\.npmrc|"
+        r"\.dockerenv|docker-compose\.yml|Dockerfile|"
+        r"Makefile|Rakefile|Gemfile|package\.json|composer\.json|"
+        r"wp-config\.php|configuration\.php|LocalSettings\.php|"
+        r"\.aws/credentials|\.ssh/|id_rsa|id_ed25519|"
+        r"\.pgpass|\.my\.cnf|\.netrc|\.bash_history|"
+        r"thumbs\.db|desktop\.ini|\.git/HEAD|\.svn/entries)"
+        r"$",
+        re.I,
+    )
 
     def __init__(
         self,
@@ -242,6 +303,33 @@ class ForcedBrowser:
             return None
 
         sc = resp.status_code
+        # Also probe common backup variants of the path (.bak, ~, .old)
+        # for paths that are HTML/script — not already backup-like
+        if sc == 404 and not any(path.endswith(ext) for ext in self._BACKUP_EXTENSIONS):
+            for ext in (".bak", ".old", "~", ".swp", ".save", ".orig", ".zip"):
+                bak_url = f"{self.base_url}/{path.lstrip('/')}{ext}"
+                try:
+                    bak_resp = self.session.get(
+                        bak_url, timeout=self.timeout,
+                        allow_redirects=False,
+                        headers={"User-Agent": "Mozilla/5.0 (DAST-ForcedBrowse/2.0)"},
+                        verify=False,
+                    )
+                    if bak_resp.status_code == 200:
+                        bak_cl = int(bak_resp.headers.get("content-length", len(bak_resp.content)))
+                        bak_ct = bak_resp.headers.get("content-type", "")
+                        result = BrowseResult(
+                            url=bak_url, status_code=200,
+                            content_length=bak_cl, content_type=bak_ct,
+                            note=f"BACKUP FILE FOUND — {path}{ext} ({bak_cl} bytes)",
+                            interesting=True,
+                        )
+                        with self._lock:
+                            self.results.append(result)
+                        if self.callback:
+                            self.callback(result)
+                except Exception:
+                    pass
         if sc not in self.INTERESTING_STATUS:
             return None
 
@@ -264,6 +352,11 @@ class ForcedBrowser:
         else:
             note = f"Status {sc}"
 
+        # Check for backup/config file patterns
+        backup_note = self._classify_sensitive_file(path, sc, ct, cl)
+        if backup_note:
+            note = backup_note
+
         return BrowseResult(
             url            = url,
             status_code    = sc,
@@ -273,3 +366,35 @@ class ForcedBrowser:
             note           = note,
             interesting    = True,
         )
+
+    def _classify_sensitive_file(self, path: str, status: int, content_type: str, size: int) -> str | None:
+        """Classify a discovered path as backup, config, or sensitive file."""
+        path_lower = path.lower()
+
+        # Backup file detection
+        for ext in self._BACKUP_EXTENSIONS:
+            if path_lower.endswith(ext):
+                if status == 200:
+                    return f"SENSITIVE FILE — backup/artifact '{path}' accessible ({size} bytes)"
+                elif status in (401, 403):
+                    return f"SENSITIVE FILE — backup/artifact '{path}' exists (access denied)"
+
+        # Config file detection
+        if self._CONFIG_PATTERNS.search(path_lower):
+            if status == 200:
+                return f"SENSITIVE CONFIG — '{path}' exposed ({size} bytes)"
+            elif status in (401, 403):
+                return f"SENSITIVE CONFIG — '{path}' exists (access denied)"
+
+        # Source code exposure
+        source_exts = (".php", ".py", ".rb", ".java", ".cs", ".go", ".rs")
+        if any(path_lower.endswith(ext + s) for ext in source_exts for s in (".bak", ".old", "~", ".swp")):
+            if status == 200:
+                return f"SOURCE CODE BACKUP — '{path}' accessible ({size} bytes)"
+
+        # Database/dump files served with wrong content type
+        db_exts = (".sql", ".dump", ".sqlite", ".db", ".mdb")
+        if any(path_lower.endswith(ext) for ext in db_exts) and status == 200:
+            return f"DATABASE FILE — '{path}' accessible ({size} bytes)"
+
+        return None

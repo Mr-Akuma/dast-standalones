@@ -1,0 +1,291 @@
+# ============================================================================
+# DAST Security Scan — Reusable GitHub Actions Workflow
+# ============================================================================
+# Triggers:
+#   - workflow_dispatch (manual with inputs)
+#   - workflow_call (reusable from other repos)
+#
+# Usage from another workflow:
+#   jobs:
+#     security:
+#       uses: your-org/dast-standalone/.github/workflows/dast-scan.yml@main
+#       with:
+#         target: "https://staging.example.com"
+#         scan_profile: "standard"
+#         fail_on: "high"
+# ============================================================================
+
+name: DAST Security Scan
+
+on:
+  # Reusable workflow — called from other repos/workflows
+  workflow_call:
+    inputs:
+      target:
+        description: "Target URL to scan"
+        required: true
+        type: string
+      scan_profile:
+        description: "Scan profile: quick (passive only), standard (crawl+fuzz), full (everything)"
+        required: false
+        default: "standard"
+        type: string
+      fail_on:
+        description: "Severity threshold to fail the build (critical, high, medium, low)"
+        required: false
+        default: "high"
+        type: string
+      openapi_spec:
+        description: "URL or path to OpenAPI/Swagger spec"
+        required: false
+        default: ""
+        type: string
+      max_pages:
+        description: "Maximum pages to crawl"
+        required: false
+        default: "200"
+        type: string
+      extra_args:
+        description: "Additional CLI arguments to pass to the scanner"
+        required: false
+        default: ""
+        type: string
+    outputs:
+      finding_count:
+        description: "Total number of findings"
+        value: ${{ jobs.dast-scan.outputs.finding_count }}
+      exit_code:
+        description: "Scanner exit code (0=pass, 1=fail, 2=warn)"
+        value: ${{ jobs.dast-scan.outputs.exit_code }}
+      sarif_path:
+        description: "Path to generated SARIF report"
+        value: ${{ jobs.dast-scan.outputs.sarif_path }}
+
+  # Manual trigger for standalone runs
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Target URL to scan"
+        required: true
+        type: string
+      scan_profile:
+        description: "Scan profile"
+        required: false
+        default: "standard"
+        type: choice
+        options:
+          - quick
+          - standard
+          - full
+      fail_on:
+        description: "Severity threshold to fail build"
+        required: false
+        default: "high"
+        type: choice
+        options:
+          - critical
+          - high
+          - medium
+          - low
+      openapi_spec:
+        description: "OpenAPI spec URL or path"
+        required: false
+        default: ""
+        type: string
+      max_pages:
+        description: "Maximum pages to crawl"
+        required: false
+        default: "200"
+        type: string
+      extra_args:
+        description: "Additional CLI arguments"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  dast-scan:
+    name: DAST Security Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    outputs:
+      finding_count: ${{ steps.results.outputs.finding_count }}
+      exit_code: ${{ steps.scan.outputs.exit_code }}
+      sarif_path: ${{ steps.scan.outputs.sarif_path }}
+
+    steps:
+      # ── Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout scanner
+        uses: actions/checkout@v4
+
+      # ── Python setup ──────────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # ── Install dependencies ──────────────────────────────────────────────
+      - name: Install Python dependencies
+        run: |
+          pip install --quiet -r requirements.txt
+          pip install --quiet sqlmap 2>/dev/null || true
+          echo "[DAST] Python dependencies installed"
+
+      # ── Install system tools ──────────────────────────────────────────────
+      - name: Install nmap
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nmap
+          echo "[DAST] nmap $(nmap --version 2>&1 | head -1)"
+
+      # ── Install nuclei ───────────────────────────────────────────────────
+      - name: Install nuclei
+        run: |
+          NUCLEI_VERSION=$(curl -s https://api.github.com/repos/projectdiscovery/nuclei/releases/latest | jq -r '.tag_name')
+          NUCLEI_VERSION_NUM=${NUCLEI_VERSION#v}
+          curl -sSfL "https://github.com/projectdiscovery/nuclei/releases/download/${NUCLEI_VERSION}/nuclei_${NUCLEI_VERSION_NUM}_linux_amd64.zip" -o /tmp/nuclei.zip
+          unzip -o /tmp/nuclei.zip -d /tmp/nuclei-bin
+          sudo mv /tmp/nuclei-bin/nuclei /usr/local/bin/nuclei
+          chmod +x /usr/local/bin/nuclei
+          nuclei -version 2>&1 || true
+          echo "[DAST] Nuclei installed"
+
+      # ── Build scan command based on profile ───────────────────────────────
+      - name: Run DAST scan
+        id: scan
+        run: |
+          set +e
+          mkdir -p dast-results
+
+          SCAN_CMD="python3 main.py --headless"
+          SCAN_CMD="$SCAN_CMD --target '${{ inputs.target }}'"
+          SCAN_CMD="$SCAN_CMD --output dast-results/dast-report.json"
+          SCAN_CMD="$SCAN_CMD --output-sarif dast-results/dast-report.sarif"
+          SCAN_CMD="$SCAN_CMD --fail-on ${{ inputs.fail_on }}"
+          SCAN_CMD="$SCAN_CMD --max-pages ${{ inputs.max_pages }}"
+
+          # OpenAPI spec
+          if [ -n "${{ inputs.openapi_spec }}" ]; then
+            SCAN_CMD="$SCAN_CMD --openapi '${{ inputs.openapi_spec }}'"
+          fi
+
+          # Profile-based configuration
+          PROFILE="${{ inputs.scan_profile }}"
+          case "$PROFILE" in
+            quick)
+              SCAN_CMD="$SCAN_CMD --no-fuzz --no-token-analysis --depth 2 --max-pages 50"
+              echo "[DAST] Profile: quick (passive only, shallow crawl)"
+              ;;
+            full)
+              SCAN_CMD="$SCAN_CMD --force-browse --ajax-spider --depth 10 --max-pages 500"
+              echo "[DAST] Profile: full (all scanners, deep crawl, forced browse)"
+              ;;
+            *)
+              echo "[DAST] Profile: standard (crawl + active fuzz)"
+              ;;
+          esac
+
+          # Extra arguments
+          if [ -n "${{ inputs.extra_args }}" ]; then
+            SCAN_CMD="$SCAN_CMD ${{ inputs.extra_args }}"
+          fi
+
+          echo "[DAST] Command: $SCAN_CMD"
+          echo "---"
+          eval $SCAN_CMD
+          EXIT_CODE=$?
+
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          echo "sarif_path=dast-results/dast-report.sarif" >> "$GITHUB_OUTPUT"
+          echo "[DAST] Scan completed with exit code: $EXIT_CODE"
+
+      # ── Extract results metadata ──────────────────────────────────────────
+      - name: Extract results
+        id: results
+        if: always()
+        run: |
+          if [ -f "dast-results/dast-report.json" ]; then
+            COUNT=$(python3 -c "
+          import json
+          with open('dast-results/dast-report.json') as f:
+              data = json.load(f)
+          findings = data.get('findings', [])
+          print(len(findings))
+          " 2>/dev/null || echo "0")
+            echo "finding_count=$COUNT" >> "$GITHUB_OUTPUT"
+            echo "[DAST] Total findings: $COUNT"
+
+            # Print severity summary
+            python3 -c "
+          import json
+          with open('dast-results/dast-report.json') as f:
+              data = json.load(f)
+          findings = data.get('findings', [])
+          sev = {}
+          for f in findings:
+              s = f.get('severity', 'Info')
+              sev[s] = sev.get(s, 0) + 1
+          for s in ['Critical', 'High', 'Medium', 'Low', 'Info']:
+              if s in sev:
+                  print(f'  {s}: {sev[s]}')
+          " 2>/dev/null || true
+          else
+            echo "finding_count=0" >> "$GITHUB_OUTPUT"
+            echo "[DAST] No report file found"
+          fi
+
+      # ── Upload SARIF to GitHub Code Scanning ──────────────────────────────
+      - name: Upload SARIF to Code Scanning
+        if: always() && hashFiles('dast-results/dast-report.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: dast-results/dast-report.sarif
+          category: dast-standalone
+        continue-on-error: true
+
+      # ── Upload JSON report as artifact ────────────────────────────────────
+      - name: Upload scan reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dast-scan-results
+          path: |
+            dast-results/dast-report.json
+            dast-results/dast-report.sarif
+          retention-days: 90
+          if-no-files-found: warn
+
+      # ── Enforce exit code ─────────────────────────────────────────────────
+      - name: Enforce severity policy
+        if: always()
+        run: |
+          EXIT_CODE=${{ steps.scan.outputs.exit_code }}
+          FINDINGS=${{ steps.results.outputs.finding_count }}
+
+          echo "========================================="
+          echo " DAST Scan Summary"
+          echo "========================================="
+          echo " Target:     ${{ inputs.target }}"
+          echo " Profile:    ${{ inputs.scan_profile }}"
+          echo " Fail-on:    ${{ inputs.fail_on }}"
+          echo " Findings:   ${FINDINGS:-0}"
+          echo " Exit code:  $EXIT_CODE"
+          echo "========================================="
+
+          if [ "$EXIT_CODE" = "1" ]; then
+            echo "::error::DAST scan FAILED: findings at or above '${{ inputs.fail_on }}' severity"
+            exit 1
+          elif [ "$EXIT_CODE" = "2" ]; then
+            echo "::warning::DAST scan WARNING: findings present but below '${{ inputs.fail_on }}' threshold"
+            exit 0
+          else
+            echo "DAST scan PASSED: no findings at or above '${{ inputs.fail_on }}' severity"
+            exit 0
+          fi

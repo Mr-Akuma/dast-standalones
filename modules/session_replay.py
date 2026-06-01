@@ -30,6 +30,11 @@ import requests
 # Max response body size to capture per entry (64KB)
 _MAX_BODY_SIZE = 65536
 
+# Cookie names that likely carry session/auth state
+_SESSION_COOKIE_RE = re.compile(
+    r"\b(session|auth|token|sid|jwt|access|refresh|credential|id_token|bearer)\b", re.I
+)
+
 
 class HttpExchange:
     """Single captured HTTP request/response pair."""
@@ -331,11 +336,38 @@ def _parse_raw_http(raw: str, is_request: bool = True) -> tuple[dict, str]:
     return headers, body
 
 
+def _extract_auth_from_exchanges(exchanges: list) -> dict:
+    """Scan recorded exchanges for session cookies and Bearer tokens.
+
+    Reads response Set-Cookie headers (auth-named cookies only) and request
+    Authorization: Bearer headers. Last value wins — assumes final exchange
+    reflects the post-login authenticated state.
+    """
+    cookies: dict[str, str] = {}
+    authorization: Optional[str] = None
+    for ex in exchanges:
+        set_cookie = (ex.response_headers.get("Set-Cookie", "")
+                      or ex.response_headers.get("set-cookie", ""))
+        if set_cookie:
+            for cookie_str in set_cookie.split("\n"):
+                name_val = cookie_str.strip().split(";")[0].strip()
+                if "=" in name_val:
+                    name, val = name_val.split("=", 1)
+                    if _SESSION_COOKIE_RE.search(name.strip()):
+                        cookies[name.strip()] = val.strip()
+        auth_hdr = (ex.request_headers.get("Authorization", "")
+                    or ex.request_headers.get("authorization", ""))
+        if auth_hdr and auth_hdr.lower().startswith("bearer "):
+            authorization = auth_hdr
+    return {"cookies": cookies, "authorization": authorization}
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # REPLAY → SITEMAP — convert exchanges into fuzzable surfaces
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def replay_to_sitemap(exchanges: list[HttpExchange], scope=None):
+def replay_to_sitemap(exchanges: list[HttpExchange], scope=None,
+                      inject_session: Optional[requests.Session] = None):
     """
     Convert loaded exchanges into a SiteMap with pages and InputSurfaces.
     Optionally filter by scope.
@@ -419,5 +451,12 @@ def replay_to_sitemap(exchanges: list[HttpExchange], scope=None):
                         param_type="cookie",
                         original_value=val.strip(),
                     ))
+
+    if inject_session is not None:
+        auth = _extract_auth_from_exchanges(exchanges)
+        for name, value in auth["cookies"].items():
+            inject_session.cookies.set(name, value)
+        if auth["authorization"]:
+            inject_session.headers["Authorization"] = auth["authorization"]
 
     return sitemap

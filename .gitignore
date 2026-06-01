@@ -15,3 +15,46 @@ cookies.txt
 import*
 "import*
 *.tmp
+
+# Local runtime state
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+cookies.txt
+.dast/
+reports/
+proto_pollution_results.json
+
+# Tool caches and coverage
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Local agent/session state
+.claude/
+MEMORY/
+SESSION_STATE.md
+BurpBountyData/
+
+# Generated fuzzing leftovers
+${HOME}/
+&&
+1000
+2000
+3000
+500
+E
+P
+XSSTEST*
+href._okta/
+href=\[\^_\]_/
+href=_\[\^_\]__/
+href\[\^_\]_/
+redirect=\[\^_&\]_/
+redirect\[\^_\]_
+redirect\[\^___\]_

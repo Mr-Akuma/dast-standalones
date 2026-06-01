@@ -1,0 +1,9 @@
+stats/
+usage/usage
+statistik/usage
+stats/usage
+stats/daily/
+stats/monthly/
+stats/top
+awstats/
+webstats/

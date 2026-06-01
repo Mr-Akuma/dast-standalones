@@ -1,0 +1,40 @@
+# DAST Standalone — Example scan configuration
+# Usage: python3 main.py --headless --scan-config examples/scan.yaml
+
+target: http://example.com
+max_pages: 100
+depth: 3
+timeout: 15
+
+# Output
+output: dast-report.json
+output_sarif: dast-report.sarif
+fail_on: high
+
+# Scanning options
+force_browse: true
+wordlist: common
+# no_fuzz: false
+# no_token_analysis: false
+
+# Auth (uncomment one method):
+# login_url: http://example.com/login
+# login_user: admin
+# login_pass: password123
+
+# token_url: http://example.com/api/auth/login
+# login_user: admin
+# login_pass: password123
+# token_path: data.access_token
+
+# auth_script: auth-flow.json
+
+# Policy & suppression
+# policy: policy.json
+# suppress: .dast-suppress.json
+
+# Hooks — scripts run at scan lifecycle points
+hooks:
+  pre_scan: "echo 'Starting DAST scan against $DAST_TARGET'"
+  post_scan: "echo 'Scan complete'"
+  on_finding: "echo 'Finding detected' && cat"

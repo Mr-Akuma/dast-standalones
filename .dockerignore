@@ -1,0 +1,16 @@
+.git
+__pycache__
+*.pyc
+*.tmp
+*.log
+examples/
+Plans/
+hooks/
+.dockerignore
+.gitignore
+.github/
+docker-compose.yml
+Dockerfile.test-target
+cookies.txt
+reports/
+dast-results/

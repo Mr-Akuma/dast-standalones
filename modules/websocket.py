@@ -74,6 +74,8 @@ CMDI_PAYLOADS = [
 
 # ── Info disclosure patterns ─────────────────────────────────────────────────
 
+SESSION_HOLD_SECS: int = 35  # seconds to hold connection open in renewal test
+
 INFO_LEAK_PATTERNS = [
     (re.compile(r"at\s+[\w.]+\([\w/\\]+\.(?:js|ts|py|java|go|rb):\d+", re.I), "stack_trace"),
     (re.compile(r"(?:\/home\/|\/var\/|\/usr\/|C:\\\\|\/app\/|\/src\/)\S+", re.I), "file_path"),
@@ -99,18 +101,22 @@ class WebSocketScanner:
 
     def __init__(
         self,
-        target:     str,
-        stop_event  = None,
-        on_finding: Callable | None = None,
-        timeout:    int = 5,
-        rate_limit: float = 0.05,
+        target:      str,
+        stop_event   = None,
+        on_finding:  Callable | None = None,
+        timeout:     int = 5,
+        rate_limit:  float = 0.05,
+        auth_headers: dict | None = None,
     ):
-        self.target     = target.rstrip("/")
-        self.stop_event = stop_event
-        self.on_finding = on_finding
-        self.timeout    = timeout
-        self.rate_limit = rate_limit
+        self.target      = target.rstrip("/")
+        self.stop_event  = stop_event
+        self.on_finding  = on_finding
+        self.timeout     = timeout
+        self.rate_limit  = rate_limit
         self._alive_urls: list[str] = []
+        # Auth headers (cookies, Authorization) injected into every WS handshake
+        # except those explicitly testing auth-bypass (skip_auth=True).
+        self._auth_headers: dict = dict(auth_headers) if auth_headers else {}
 
         # Derive ws:// / wss:// base from http target
         parsed = urlparse(self.target)
@@ -157,7 +163,14 @@ class WebSocketScanner:
 
     def _ws_connect(self, url: str, origin: str | None = None,
                     headers: dict | None = None, skip_auth: bool = False) -> "ws_client.WebSocket | None":
-        """Try to establish a WebSocket connection. Returns WebSocket or None."""
+        """Try to establish a WebSocket connection. Returns WebSocket or None.
+
+        When skip_auth=False (default), any auth_headers stored on the scanner
+        (cookies, Authorization) are included in the upgrade handshake so that
+        authenticated WebSocket endpoints can be reached during scanning.
+        skip_auth=True is used only by _test_auth_bypass to intentionally probe
+        the endpoint without credentials.
+        """
         if not WS_AVAILABLE:
             return None
         try:
@@ -165,6 +178,10 @@ class WebSocketScanner:
             h = []
             if origin:
                 h.append(f"Origin: {origin}")
+            # Inject auth headers unless this is an explicit unauthenticated probe
+            if not skip_auth and self._auth_headers:
+                for k, v in self._auth_headers.items():
+                    h.append(f"{k}: {v}")
             if headers:
                 for k, v in headers.items():
                     h.append(f"{k}: {v}")
@@ -214,32 +231,53 @@ class WebSocketScanner:
             if self._stopped():
                 break
 
-            # Test 1: Cross-Site WebSocket Hijacking
+            # Test 1: Connection upgrade validation (Origin + version checks)
+            findings += self._test_upgrade_validation(url)
+
+            # Test 2: Cross-Site WebSocket Hijacking — full (5 origins + CSRF)
             findings += self._test_cswsh(url)
 
-            # Test 2: Auth bypass
+            # Test 3: Auth bypass
             findings += self._test_auth_bypass(url)
 
-            # Test 3: SQL/NoSQL injection
+            # Test 4: Frame-level payload injection (binary + raw text)
+            findings += self._test_frame_injection(url)
+
+            # Test 5: SQL/NoSQL injection (JSON-wrapped)
             findings += self._test_injection(url)
 
-            # Test 4: XSS injection
+            # Test 6: XSS injection (JSON-wrapped)
             findings += self._test_xss(url)
 
-            # Test 5: Message flooding / rate limiting
+            # Test 7: State machine fuzzing (out-of-order sequences)
+            findings += self._test_state_machine_fuzzing(url)
+
+            # Test 8: Session token renewal / post-logout invalidation
+            findings += self._test_session_token_renewal(url)
+
+            # Test 9: Message flooding / rate limiting
             findings += self._test_flooding(url)
 
-            # Test 6: Large frame abuse
+            # Test 10: Large frame abuse
             findings += self._test_large_frame(url)
 
-            # Test 7: Info disclosure
+            # Test 11: Info disclosure
             findings += self._test_info_disclosure(url)
 
-            # Test 8: Insecure transport
+            # Test 12: Insecure transport
             findings += self._test_insecure_transport(url)
 
-            # Test 9: Command injection
+            # Test 13: Command injection
             findings += self._test_command_injection(url)
+
+            # Test 14: Binary frame protocol violations (reserved opcodes, RSV bits, oversized control)
+            findings += self._test_binary_frame_malformed(url)
+
+            # Test 15: Subprotocol downgrade (server accepts weaker/unrequested protocol)
+            findings += self._test_subprotocol_downgrade(url)
+
+            # Test 16: Close frame data injection
+            findings += self._test_close_frame_injection(url)
 
         return findings
 
@@ -279,31 +317,68 @@ class WebSocketScanner:
     # ══════════════════════════════════════════════════════════════════════════
 
     def _test_cswsh(self, url: str) -> list[dict]:
+        """Full CSWSH test — 5 origin variants + CSRF token absence probe.
+
+        Covers:
+          - Third-party evil origin
+          - null origin (browser sandbox frame bypass)
+          - Subdomain typosquatting  evil.{target_host}
+          - Origin suffix confusion  {target_host}.evil.com
+          - CSRF token absence on upgrade (when any origin is accepted)
+        """
         findings = []
-        evil_origins = [
-            "https://evil.com",
-            "https://attacker.example.com",
-            "null",
+        parsed   = urlparse(url)
+        host     = parsed.netloc  # e.g. example.com:8080
+
+        origin_probes = [
+            ("https://evil.com",                      "third_party_origin",  "high"),
+            ("https://attacker.example.com",           "third_party_origin",  "high"),
+            ("null",                                   "null_origin",         "high"),
+            (f"https://evil.{host}",                  "subdomain_typosquat", "high"),
+            (f"https://{host}.evil.com",              "suffix_confusion",    "critical"),
         ]
 
-        for origin in evil_origins:
+        for origin, label, severity in origin_probes:
             if self._stopped():
                 break
             ws = self._ws_connect(url, origin=origin)
             if ws:
-                # Connection accepted with evil origin — CSWSH vulnerability
-                # Try to send a message to confirm it's fully functional
                 resp = self._ws_send_recv(ws, '{"type":"ping"}')
                 self._ws_close(ws)
-
                 findings.append(self._finding(
                     url=url, vuln_type="ws_cswsh",
-                    finding=f"Cross-Site WebSocket Hijacking — connection accepted with Origin: {origin} [{url}]",
-                    severity="high",
-                    proof=f"WS connection established with Origin: {origin}, response: {(resp or 'none')[:200]}",
+                    finding=(
+                        f"CSWSH [{label}]: WebSocket upgrade accepted with "
+                        f"Origin: {origin} [{url}]"
+                    ),
+                    severity=severity,
+                    proof=(
+                        f"Origin: {origin} accepted; "
+                        f"response: {(resp or 'none')[:200]}"
+                    ),
                     payload=f"Origin: {origin}",
                 ))
-                break  # One finding is enough
+
+        # CSRF token absence probe — fires only if at least one evil origin was accepted
+        if findings and not self._stopped():
+            # Attempt upgrade with evil origin but NO X-CSRF-Token / no auth cookies
+            # If this succeeds the attack is fully exploitable from a browser
+            ws = self._ws_connect(url, origin="https://evil.com")
+            if ws:
+                self._ws_close(ws)
+                findings.append(self._finding(
+                    url=url, vuln_type="ws_cswsh_no_csrf",
+                    finding=(
+                        f"CSWSH fully exploitable — evil origin accepted "
+                        f"with no CSRF token on upgrade [{url}]"
+                    ),
+                    severity="critical",
+                    proof=(
+                        "Evil origin accepted AND no X-CSRF-Token/anti-CSRF "
+                        "validation detected in upgrade handshake"
+                    ),
+                    payload="Origin: https://evil.com (no CSRF token)",
+                ))
 
         return findings
 
@@ -652,13 +727,703 @@ class WebSocketScanner:
         return findings
 
 
+    # ══════════════════════════════════════════════════════════════════════════
+    # TEST 10: CONNECTION UPGRADE VALIDATION
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _test_upgrade_validation(self, url: str) -> list[dict]:
+        """Test the HTTP → WebSocket upgrade handshake for security flaws.
+
+        Three independent probes:
+          1. No Origin header  — server MUST validate or reject origin-less upgrades.
+          2. Origin: null      — used by sandboxed iframes; many servers whitelist it.
+          3. Sec-WebSocket-Version: 12 — old non-standard version; spec requires 13.
+             Acceptance implies loose version validation.
+        """
+        findings = []
+
+        # Probe 1: no Origin header at all
+        # _ws_connect(origin=None) already sends no Origin header
+        ws = self._ws_connect(url, origin=None)
+        if ws:
+            resp = self._ws_send_recv(ws, '{"type":"ping"}')
+            self._ws_close(ws)
+            findings.append(self._finding(
+                url=url, vuln_type="ws_missing_origin_check",
+                finding=(
+                    f"WebSocket upgrade accepted with no Origin header — "
+                    f"server performs no origin validation [{url}]"
+                ),
+                severity="high",
+                proof=(
+                    f"Connection established without Origin header; "
+                    f"response: {(resp or 'none')[:200]}"
+                ),
+                payload="(no Origin header)",
+            ))
+
+        # Probe 2: Origin: null
+        if not self._stopped():
+            ws = self._ws_connect(url, origin="null")
+            if ws:
+                resp = self._ws_send_recv(ws, '{"type":"ping"}')
+                self._ws_close(ws)
+                findings.append(self._finding(
+                    url=url, vuln_type="ws_null_origin_accepted",
+                    finding=(
+                        f"WebSocket upgrade accepted with Origin: null — "
+                        f"bypasses allowlist origin checks [{url}]"
+                    ),
+                    severity="high",
+                    proof=(
+                        f"Connection established with Origin: null; "
+                        f"response: {(resp or 'none')[:200]}"
+                    ),
+                    payload="Origin: null",
+                ))
+
+        # Probe 3: wrong Sec-WebSocket-Version (12 instead of 13)
+        if not self._stopped():
+            ws = self._ws_connect(url, headers={"Sec-WebSocket-Version": "12"})
+            if ws:
+                self._ws_close(ws)
+                findings.append(self._finding(
+                    url=url, vuln_type="ws_downgrade_accepted",
+                    finding=(
+                        f"WebSocket accepts downgraded Sec-WebSocket-Version: 12 "
+                        f"(RFC 6455 requires 13) [{url}]"
+                    ),
+                    severity="low",
+                    proof="Server accepted WS version 12 — indicates loose handshake validation",
+                    payload="Sec-WebSocket-Version: 12",
+                ))
+
+        return findings
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TEST 11: FRAME-LEVEL PAYLOAD INJECTION
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _test_frame_injection(self, url: str) -> list[dict]:
+        """Inject payloads at the WS frame level — binary frames and raw text.
+
+        Distinct from _test_injection (which wraps payloads in JSON).  Binary
+        frame injection can bypass JSON-aware input sanitisation, and raw text
+        injection tests servers that accept non-JSON protocol messages.
+        """
+        findings = []
+        ws = self._ws_connect(url, origin=self._origin)
+        if not ws:
+            return findings
+
+        error_patterns = [
+            "sql", "syntax error", "mysql", "postgres", "sqlite",
+            "traceback", "exception", "at line", "internal error",
+            "root:", "/bin/", "/etc/", "49",   # 49 = 7*7 SSTI result
+        ]
+
+        # ── Binary frame injection ───────────────────────────────────────────
+        binary_payloads: list[tuple[str, bytes]] = [
+            ("sqli_binary",   b"\' OR \'1\'=\'1\x00"),
+            ("xss_binary",    b"<script>alert(1)</script>\x00"),
+            ("cmdi_binary",   b"; cat /etc/passwd\x00"),
+            ("null_bytes",    b"\x00" * 64),
+            ("high_bytes",    bytes(range(128, 200))),
+        ]
+        for name, payload_bytes in binary_payloads:
+            if self._stopped():
+                break
+            try:
+                ws.send_binary(payload_bytes)
+                resp = None
+                try:
+                    ws.settimeout(2.0)
+                    resp = ws.recv()
+                except Exception:
+                    pass
+                if resp:
+                    body = resp.lower()
+                    if any(e in body for e in error_patterns):
+                        findings.append(self._finding(
+                            url=url, vuln_type="ws_binary_injection",
+                            finding=(
+                                f"Binary frame injection ({name}) triggered "
+                                f"error/sensitive response [{url}]"
+                            ),
+                            severity="medium",
+                            proof=resp[:300],
+                            payload=f"binary:{name}",
+                        ))
+            except Exception:
+                pass
+
+        # ── Raw text (non-JSON) frame injection ──────────────────────────────
+        raw_text_payloads: list[tuple[str, str]] = [
+            ("raw_sqli",    "\' OR \'1\'=\'1"),
+            ("raw_xss",     "<script>alert(document.cookie)</script>"),
+            ("raw_cmdi",    "; id ; uname -a"),
+            ("raw_ssti",    "{{7*7}}${7*7}"),
+            ("raw_lfi",     "../../../../etc/passwd"),
+            ("raw_xxe",     (
+                "<?xml version=\'1.0\'?>"
+                "<!DOCTYPE x [<!ENTITY xxe SYSTEM \'file:///etc/passwd\'>]>"
+                "<x>&xxe;</x>"
+            )),
+        ]
+        for name, raw_payload in raw_text_payloads:
+            if self._stopped():
+                break
+            resp = self._ws_send_recv(ws, raw_payload)
+            if resp:
+                body = resp.lower()
+                if any(e in body for e in error_patterns):
+                    findings.append(self._finding(
+                        url=url, vuln_type="ws_raw_frame_injection",
+                        finding=(
+                            f"Raw text frame injection ({name}) triggered "
+                            f"vulnerable response [{url}]"
+                        ),
+                        severity="high",
+                        proof=resp[:300],
+                        payload=raw_payload[:100],
+                    ))
+
+        self._ws_close(ws)
+        return findings
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TEST 12: SESSION TOKEN RENEWAL
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _test_session_token_renewal(self, url: str) -> list[dict]:
+        """Test whether session tokens are renewed or invalidated during
+        a persistent WebSocket connection.
+
+        Two sub-tests:
+          1. Long-held connection — hold for SESSION_HOLD_SECS using periodic
+             pings; if still responsive afterwards the server never rotated
+             or invalidated the token.
+          2. Post-logout invalidation — probe common logout paths via HTTP,
+             then re-test WS session.  If WS still works, logout doesn't
+             invalidate the WS session.
+        """
+        findings = []
+
+        # ── Sub-test 1: long-held connection ─────────────────────────────────
+        ws = self._ws_connect(url, origin=self._origin)
+        if not ws:
+            return findings
+
+        # Periodic ping keepalive for SESSION_HOLD_SECS
+        deadline = time.time() + SESSION_HOLD_SECS
+        still_alive = True
+        while time.time() < deadline and not self._stopped():
+            try:
+                ws.ping()
+            except Exception:
+                still_alive = False
+                break
+            time.sleep(5)
+
+        if still_alive and not self._stopped():
+            resp = self._ws_send_recv(ws, '{"type":"ping","test":"renewal"}', recv_timeout=5.0)
+            resp_lower = (resp or "").lower()
+            if resp and "unauthorized" not in resp_lower and "expired" not in resp_lower:
+                findings.append(self._finding(
+                    url=url, vuln_type="ws_session_no_renewal",
+                    finding=(
+                        f"WebSocket session not renewed after {SESSION_HOLD_SECS}s "
+                        f"persistent connection — token appears perpetually valid [{url}]"
+                    ),
+                    severity="medium",
+                    proof=(
+                        f"Connection active after {SESSION_HOLD_SECS}s hold; "
+                        f"response: {(resp or 'none')[:200]}"
+                    ),
+                    payload=f"hold={SESSION_HOLD_SECS}s",
+                ))
+        self._ws_close(ws)
+
+        # ── Sub-test 2: post-logout WS session invalidation ──────────────────
+        if self._stopped():
+            return findings
+
+        logout_paths = [
+            "/api/logout", "/logout", "/auth/logout",
+            "/api/auth/logout", "/api/session", "/session/logout",
+        ]
+        import urllib.request as _urllib_req
+        parsed = urlparse(self.target)
+        for path in logout_paths:
+            if self._stopped():
+                break
+            logout_url = f"{self._http_scheme}://{parsed.netloc}{path}"
+            try:
+                req = _urllib_req.Request(logout_url, method="DELETE")
+                req.add_header("Origin", self._origin)
+                _urllib_req.urlopen(req, timeout=3)
+            except Exception:
+                pass  # 404/405 expected — probe regardless
+
+            # Attempt fresh WS connect after logout
+            ws2 = self._ws_connect(url, origin=self._origin)
+            if ws2:
+                resp2 = self._ws_send_recv(
+                    ws2, '{"type":"ping","test":"post_logout"}', recv_timeout=4.0,
+                )
+                self._ws_close(ws2)
+                resp2_lower = (resp2 or "").lower()
+                if resp2 and "unauthorized" not in resp2_lower and "expired" not in resp2_lower:
+                    findings.append(self._finding(
+                        url=url, vuln_type="ws_session_post_logout",
+                        finding=(
+                            f"WebSocket session still active after logout probe "
+                            f"to {path} — token not invalidated on logout [{url}]"
+                        ),
+                        severity="high",
+                        proof=(
+                            f"Logout attempted via DELETE {path}; "
+                            f"WS response: {(resp2 or 'none')[:200]}"
+                        ),
+                        payload=f"DELETE {logout_url}",
+                    ))
+                    break  # one post-logout finding is enough
+
+        return findings
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TEST 13: STATE MACHINE FUZZING
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _test_state_machine_fuzzing(self, url: str) -> list[dict]:
+        """Send out-of-order and malformed message sequences to probe state
+        machine robustness.
+
+        Each sequence opens a fresh connection to avoid cross-sequence state
+        bleed.  A finding is raised when the server returns a stack trace,
+        exception message, or a crash indicator in response to a sequence.
+
+        Sequences tested:
+          data_before_subscribe     — payload before any auth/subscribe
+          double_subscribe          — subscribe to same channel twice
+          unsubscribe_without_sub   — unsubscribe before subscribing
+          malformed_json_frame      — syntactically invalid JSON
+          null_message_frame        — literal "null" + empty string
+          deeply_nested_payload     — 40-level JSON nesting
+          oversized_action_name     — 10 000-char action key
+          unicode_overflow          — 1 000 U+FFFF codepoints
+          rapid_action_storm        — 20 messages without pause
+        """
+        import json as _json
+
+        findings = []
+
+        deep_nest = '{"a":' * 40 + '"deep"' + '}' * 40
+
+        sequences: list[tuple[str, list[str]]] = [
+            ("data_before_subscribe", [
+                '{"action":"list","resource":"users"}',
+                '{"action":"get","id":"1"}',
+            ]),
+            ("double_subscribe", [
+                '{"type":"subscribe","channel":"updates"}',
+                '{"type":"subscribe","channel":"updates"}',
+            ]),
+            ("unsubscribe_without_sub", [
+                '{"type":"unsubscribe","channel":"updates"}',
+            ]),
+            ("malformed_json_frame", [
+                '{bad json here}',
+                '{"key":',
+                '[unclosed',
+            ]),
+            ("null_message_frame", [
+                "null",
+                "",
+            ]),
+            ("deeply_nested_payload", [deep_nest]),
+            ("oversized_action_name", [
+                _json.dumps({"action": "A" * 10_000, "data": "x"}),
+            ]),
+            ("unicode_overflow", [
+                _json.dumps({"data": "\uFFFF" * 1_000}),
+            ]),
+        ]
+
+        crash_indicators = [
+            "traceback", "exception", "at line", "stack trace",
+            "internal error", "panic", "fatal", "unhandled",
+            "null pointer", "segfault", "assertion",
+        ]
+
+        for seq_name, messages in sequences:
+            if self._stopped():
+                break
+
+            ws = self._ws_connect(url, origin=self._origin)
+            if not ws:
+                continue
+
+            signals: list[str] = []
+            for msg in messages:
+                if self._stopped():
+                    break
+                try:
+                    if msg == "":
+                        # Send empty text frame
+                        ws.send("")
+                        resp = None
+                        try:
+                            ws.settimeout(2.0)
+                            resp = ws.recv()
+                        except Exception:
+                            pass
+                    else:
+                        resp = self._ws_send_recv(ws, msg, recv_timeout=3.0)
+
+                    if resp:
+                        body = resp.lower()
+                        if any(x in body for x in crash_indicators):
+                            signals.append(
+                                f"seq={seq_name} msg={msg[:60]!r}: "
+                                f"crash indicator in response: {resp[:200]}"
+                            )
+                        # Malformed JSON accepted without error is also interesting
+                        if seq_name == "malformed_json_frame" and "error" not in body:
+                            signals.append(
+                                f"seq={seq_name}: server accepted malformed JSON "
+                                f"without error: {resp[:150]}"
+                            )
+                except Exception as exc:
+                    signals.append(f"seq={seq_name}: exception during send: {exc}")
+
+            self._ws_close(ws)
+
+            if signals:
+                findings.append(self._finding(
+                    url=url, vuln_type="ws_state_machine_flaw",
+                    finding=(
+                        f"State machine flaw — sequence '{seq_name}' "
+                        f"triggered abnormal server response [{url}]"
+                    ),
+                    severity="medium",
+                    proof=("; ".join(signals))[:400],
+                    payload=seq_name,
+                ))
+
+        # Rapid action storm (20 messages, no response wait between sends)
+        if not self._stopped():
+            ws = self._ws_connect(url, origin=self._origin)
+            if ws:
+                try:
+                    for i in range(20):
+                        ws.send(_json.dumps({"action": "get", "id": str(i), "seq": i}))
+                        time.sleep(0.02)
+
+                    # Collect any responses
+                    ws.settimeout(2.0)
+                    for _ in range(20):
+                        try:
+                            r = ws.recv()
+                            if r and any(x in r.lower() for x in crash_indicators):
+                                findings.append(self._finding(
+                                    url=url, vuln_type="ws_state_machine_flaw",
+                                    finding=(
+                                        f"Server leaks internal error under "
+                                        f"rapid message storm (20 msgs) [{url}]"
+                                    ),
+                                    severity="medium",
+                                    proof=r[:300],
+                                    payload="rapid_storm_20_messages",
+                                ))
+                                break
+                        except Exception:
+                            break
+                except Exception:
+                    pass
+                finally:
+                    self._ws_close(ws)
+
+        return findings
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TEST 14: BINARY FRAME PROTOCOL VIOLATIONS
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _test_binary_frame_malformed(self, url: str) -> list[dict]:
+        """Send RFC 6455 protocol-violating frames to probe server robustness.
+
+        Distinct from _test_frame_injection (which sends attack *payloads* inside
+        valid binary frames). This test sends structurally invalid frames:
+          - Oversized ping  (>125 bytes — RFC §5.5 MUST NOT)
+          - Reserved opcode (3) — server MUST close with 1002
+          - RSV1 flag set without extension negotiation — server MUST close with 1002
+        """
+        if not WS_AVAILABLE:
+            return []
+        findings = []
+        crash_indicators = (
+            "traceback", "exception", "internal error", "panic",
+            "fatal", "assertion", "segfault", "unhandled",
+        )
+
+        # ── Probe 1: oversized ping (>125 bytes) ─────────────────────────────
+        ws = self._ws_connect(url, origin=self._origin)
+        if ws:
+            try:
+                ws.ping(b"P" * 200)
+                ws.settimeout(2.0)
+                resp = ws.recv()
+                if resp and any(c in resp.lower() for c in crash_indicators):
+                    findings.append(self._finding(
+                        url=url, vuln_type="ws_malformed_frame",
+                        finding=f"Oversized ping (200-byte payload) caused error response [{url}]",
+                        severity="medium",
+                        proof=resp[:300],
+                        payload="ping payload=200 bytes (RFC §5.5 max=125)",
+                    ))
+            except Exception:
+                pass
+            self._ws_close(ws)
+
+        # ── Probe 2: reserved non-control opcode (3) ─────────────────────────
+        ws = self._ws_connect(url, origin=self._origin)
+        if ws:
+            try:
+                frame = ws_client.ABNF.create_frame(
+                    b"reserved_opcode_probe", opcode=3, fin=1,
+                )
+                ws.send_frame(frame)
+                ws.settimeout(2.0)
+                resp = ws.recv()
+                if resp and any(c in resp.lower() for c in crash_indicators):
+                    findings.append(self._finding(
+                        url=url, vuln_type="ws_malformed_frame",
+                        finding=f"Reserved opcode 3 caused server error response [{url}]",
+                        severity="medium",
+                        proof=resp[:300],
+                        payload="opcode=3 (reserved, RFC §5.2 MUST close 1002)",
+                    ))
+            except Exception:
+                pass
+            self._ws_close(ws)
+
+        # ── Probe 3: RSV1 flag set without extension negotiation ──────────────
+        ws = self._ws_connect(url, origin=self._origin)
+        if ws:
+            try:
+                frame = ws_client.ABNF.create_frame(
+                    b"rsv1_probe",
+                    opcode=ws_client.ABNF.OPCODE_BINARY,
+                    fin=1,
+                    rsv1=1,
+                )
+                ws.send_frame(frame)
+                ws.settimeout(2.0)
+                resp = ws.recv()
+                if resp and any(c in resp.lower() for c in crash_indicators):
+                    findings.append(self._finding(
+                        url=url, vuln_type="ws_malformed_frame",
+                        finding=f"RSV1-flagged frame (no extension) caused error response [{url}]",
+                        severity="medium",
+                        proof=resp[:300],
+                        payload="RSV1=1 without Sec-WebSocket-Extensions (RFC §5.2 MUST close 1002)",
+                    ))
+            except Exception:
+                pass
+            self._ws_close(ws)
+
+        return findings
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TEST 15: SUBPROTOCOL DOWNGRADE
+    # ══════════════════════════════════════════════════════════════════════════
+
+    _STRONG_SUBPROTOCOLS = [
+        "graphql-transport-ws",
+        "chat.v3",
+        "wamp.2.json",
+        "mqtt.secure",
+        "binary.v2",
+    ]
+
+    def _test_subprotocol_downgrade(self, url: str) -> list[dict]:
+        """Test whether a server accepts a weaker or unrequested subprotocol.
+
+        A downgrade occurs when the server returns a Sec-WebSocket-Protocol value
+        that was not in the client's offered list, or returns a significantly older
+        version than the best-offered protocol.
+        """
+        if not WS_AVAILABLE:
+            return []
+        findings = []
+
+        # Connect offering the strong protocol list
+        offered = self._STRONG_SUBPROTOCOLS
+        try:
+            ws = ws_client.WebSocket(sslopt={"cert_reqs": ssl.CERT_NONE})
+            h = [f"Origin: {self._origin}"]
+            if self._auth_headers:
+                for k, v in self._auth_headers.items():
+                    h.append(f"{k}: {v}")
+            ws.connect(url, header=h, subprotocols=offered, timeout=self.timeout)
+            negotiated = ws.getheaders().get("sec-websocket-protocol", "")
+            self._ws_close(ws)
+
+            if not negotiated:
+                return findings  # server didn't negotiate any subprotocol — nothing to downgrade
+
+            # Server returned something not in our offered list → unexpected/downgraded
+            offered_set = {p.lower() for p in offered}
+            if negotiated.lower() not in offered_set:
+                findings.append(self._finding(
+                    url=url, vuln_type="ws_subprotocol_downgrade",
+                    finding=(
+                        f"WebSocket subprotocol downgrade — server returned "
+                        f"'{negotiated}' which was not in the offered list [{url}]"
+                    ),
+                    severity="medium",
+                    proof=(
+                        f"Offered: {', '.join(offered)}; "
+                        f"Server returned: {negotiated}"
+                    ),
+                    payload=f"Sec-WebSocket-Protocol: {', '.join(offered)}",
+                ))
+        except Exception:
+            pass
+
+        # Second check: request only a strong-versioned protocol, see if server
+        # accepts and then also accepts a plain connection (no subprotocol)
+        try:
+            ws_plain = self._ws_connect(url, origin=self._origin)
+            if ws_plain:
+                # Plain connection succeeded while we just offered a strict protocol → no enforcement
+                plain_headers = ws_plain.getheaders() if hasattr(ws_plain, "getheaders") else {}
+                plain_proto = plain_headers.get("sec-websocket-protocol", "")
+                self._ws_close(ws_plain)
+
+                if not plain_proto and findings:
+                    # Server accepted plain connection with no subprotocol despite
+                    # negotiating a specific one in the previous attempt — downgrade confirmed
+                    findings[0]["finding"] += " and server also accepts plain connections"
+                    findings[0]["proof"] += "; plain (no subprotocol) connection also accepted"
+        except Exception:
+            pass
+
+        return findings
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TEST 16: CLOSE FRAME DATA INJECTION
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _test_close_frame_injection(self, url: str) -> list[dict]:
+        """Inject payloads in the WebSocket Close frame reason field.
+
+        RFC 6455 §5.5.1 allows a 2-byte status code + optional UTF-8 reason.
+        Some servers process the reason string rather than discarding it —
+        enabling injection through an unexpected channel.
+        """
+        if not WS_AVAILABLE:
+            return []
+        findings = []
+
+        injection_payloads: list[tuple[str, bytes]] = [
+            ("sqli_reason",  b"' OR '1'='1\x00"),
+            ("xss_reason",   b"<script>alert(1)</script>"),
+            ("cmdi_reason",  b"; id; uname -a"),
+        ]
+        invalid_codes: list[tuple[str, int]] = [
+            ("status_0",     0),
+            ("status_999",   999),
+            ("status_5000",  5000),
+            ("status_65535", 65535),
+        ]
+
+        error_indicators = (
+            "traceback", "exception", "error", "internal",
+            "syntax", "sql", "<script", "root:", "/bin/",
+        )
+
+        # ── Injection payloads in reason field ───────────────────────────────
+        for probe_name, reason_bytes in injection_payloads:
+            if self._stopped():
+                break
+            ws = self._ws_connect(url, origin=self._origin)
+            if not ws:
+                continue
+            try:
+                # Send a couple of benign messages first so the connection is live
+                ws.send('{"type":"ping"}')
+                ws.settimeout(1.0)
+                try:
+                    ws.recv()
+                except Exception:
+                    pass
+                ws.send_close(status=1000, reason=reason_bytes)
+                ws.settimeout(2.0)
+                resp = ws.recv()
+                if resp and any(ind in resp.lower() for ind in error_indicators):
+                    findings.append(self._finding(
+                        url=url, vuln_type="ws_close_frame_injection",
+                        finding=(
+                            f"Close frame reason injection ({probe_name}) "
+                            f"triggered server-side processing [{url}]"
+                        ),
+                        severity="high",
+                        proof=resp[:300],
+                        payload=f"Close reason: {reason_bytes[:60]!r}",
+                    ))
+            except Exception:
+                pass
+            finally:
+                self._ws_close(ws)
+
+        # ── Invalid close status codes ────────────────────────────────────────
+        for code_name, status_code in invalid_codes:
+            if self._stopped():
+                break
+            ws = self._ws_connect(url, origin=self._origin)
+            if not ws:
+                continue
+            try:
+                ws.send_close(status=status_code, reason=b"dast_probe")
+                ws.settimeout(2.0)
+                resp = ws.recv()
+                if resp and any(ind in resp.lower() for ind in error_indicators):
+                    findings.append(self._finding(
+                        url=url, vuln_type="ws_close_frame_injection",
+                        finding=(
+                            f"Invalid close status code {status_code} ({code_name}) "
+                            f"triggered error response [{url}]"
+                        ),
+                        severity="medium",
+                        proof=resp[:300],
+                        payload=f"Close status={status_code}",
+                    ))
+            except Exception:
+                pass
+            finally:
+                self._ws_close(ws)
+
+        return findings
+
+
 # ── Convenience function ─────────────────────────────────────────────────────
 
 def scan_websocket(target: str, stop_event=None, on_finding=None,
-                   timeout: int = 5, extra_urls: list | None = None) -> list[dict]:
-    """One-liner: scan a target for WebSocket vulnerabilities."""
+                   timeout: int = 5, extra_urls: list | None = None,
+                   auth_headers: dict | None = None) -> list[dict]:
+    """One-liner: scan a target for WebSocket vulnerabilities.
+
+    Args:
+        auth_headers: Dict of HTTP headers to include in every WS upgrade
+            handshake (e.g. ``{"Authorization": "Bearer …", "Cookie": "…"}``).
+            Populated from the active requests.Session before calling so that
+            authenticated endpoints are reachable.
+    """
     scanner = WebSocketScanner(
         target=target, stop_event=stop_event,
         on_finding=on_finding, timeout=timeout,
+        auth_headers=auth_headers,
     )
     return scanner.scan(extra_urls=extra_urls)

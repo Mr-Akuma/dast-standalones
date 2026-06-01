@@ -1,0 +1,9 @@
+# Lightweight image for the intentionally vulnerable test target
+FROM python:3.11-slim
+
+RUN pip install --no-cache-dir flask
+WORKDIR /app
+COPY test_target.py .
+
+EXPOSE 9999
+CMD ["python3", "test_target.py"]

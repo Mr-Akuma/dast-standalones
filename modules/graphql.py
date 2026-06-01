@@ -14,11 +14,22 @@ Tests performed:
   10. CSRF via GET            — mutations executable via GET method
   11. Info disclosure         — verbose errors, stack traces, debug info
   12. GET-based queries       — query via URL parameters (cache poisoning)
+  13. Field authorization     — sensitive field access without authorization
+  14. Mutation probing        — unauthorized mutation discovery and access
+  15. Type confusion          — wrong-type arguments triggering server errors
+  16. Subscription abuse       — WebSocket subscription flooding
+  17. Complexity attacks       — wide queries, pagination abuse, fragment spreads
+  18. Field brute-force        — field discovery when introspection is disabled
+  19. Directive injection      — @deprecated / unknown directives in query position
+  20. Fragment complexity      — wide fan-out fragment tree (cyclomatic explosion)
+  21. APQ bypass               — Automatic Persisted Query hash mismatch bypass
+  22. Union type bypass        — inline fragment type boundary crossing
 
 Zero hard dependencies beyond requests (already required by parent project).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -89,6 +100,31 @@ NOSQL_PAYLOADS = [
     '{"$ne": null}',
     '{"$regex": ".*"}',
     '{"$where": "sleep(3000)"}',
+]
+
+# ── Fragment complexity tree (wide fan-out, 3 levels, 13 fragments total) ────
+# Cyclomatic complexity attack: exponential spread evaluation without circular refs.
+_FRAGMENT_COMPLEXITY_QUERY = """
+query { ...FC_Root }
+fragment FC_Root on Query { __typename ...FC_L1_0 ...FC_L1_1 ...FC_L1_2 ...FC_L1_3 }
+fragment FC_L1_0 on Query { __typename ...FC_L2_0 ...FC_L2_1 }
+fragment FC_L1_1 on Query { __typename ...FC_L2_2 ...FC_L2_3 }
+fragment FC_L1_2 on Query { __typename ...FC_L2_4 ...FC_L2_5 }
+fragment FC_L1_3 on Query { __typename ...FC_L2_6 ...FC_L2_7 }
+fragment FC_L2_0 on Query { __typename }
+fragment FC_L2_1 on Query { __typename }
+fragment FC_L2_2 on Query { __typename }
+fragment FC_L2_3 on Query { __typename }
+fragment FC_L2_4 on Query { __typename }
+fragment FC_L2_5 on Query { __typename }
+fragment FC_L2_6 on Query { __typename }
+fragment FC_L2_7 on Query { __typename }
+"""
+
+# ── Union boundary probe types ────────────────────────────────────────────────
+_UNION_PROBE_TYPES = [
+    "AdminUser", "Admin", "SuperUser", "InternalUser", "RootUser",
+    "ServiceAccount", "SystemUser", "PrivilegedUser", "BackofficeUser",
 ]
 
 # ── Info disclosure patterns ─────────────────────────────────────────────────
@@ -264,6 +300,36 @@ class GraphQLScanner:
 
             # Phase 12: GET-based query execution
             findings += self._test_get_queries(url)
+
+            # Phase 13: Field-level authorization
+            findings += self._test_field_authorization(url)
+
+            # Phase 14: Mutation probing
+            findings += self._test_mutation_probing(url)
+
+            # Phase 15: Type confusion
+            findings += self._test_type_confusion(url)
+
+            # Phase 16: Subscription abuse
+            findings += self._test_subscription_abuse(url)
+
+            # Phase 17: Complexity attacks
+            findings += self._test_complexity_attack(url)
+
+            # Phase 18: Field brute-force enumeration
+            findings += self._test_field_bruteforce(url)
+
+            # Phase 19: Directive injection (SDL-only directives in queries)
+            findings += self._test_directive_injection(url)
+
+            # Phase 20: Fragment cyclomatic complexity fan-out
+            findings += self._test_fragment_complexity(url)
+
+            # Phase 21: Automatic Persisted Query (APQ) bypass
+            findings += self._test_apq_bypass(url)
+
+            # Phase 22: Union type boundary bypass via inline fragments
+            findings += self._test_union_bypass(url)
 
         return findings
 
@@ -807,12 +873,742 @@ class GraphQLScanner:
         return findings
 
     # ══════════════════════════════════════════════════════════════════════════
+    # TEST 13: FIELD-LEVEL AUTHORIZATION
+    # ══════════════════════════════════════════════════════════════════════════
+
+    _SENSITIVE_FIELDS = {
+        "email", "password", "passwordHash", "secret", "apiKey", "token",
+        "role", "permissions", "isAdmin", "ssn", "creditCard", "salary",
+        "privateKey",
+    }
+
+    _COMMON_ROOT_QUERIES = ["user", "users", "me", "currentUser", "account"]
+
+    def _test_field_authorization(self, url: str) -> list[dict]:
+        findings: list[dict] = []
+        if self._stopped():
+            return findings
+
+        probes: list[tuple[str, str]] = []  # (query_string, description)
+
+        if self._schema:
+            # Extract OBJECT types from schema and probe sensitive fields
+            for t in self._schema.get("types", []):
+                if self._stopped():
+                    break
+                tname = t.get("name", "")
+                if tname.startswith("__") or t.get("kind") != "OBJECT":
+                    continue
+                fields = t.get("fields") or []
+                field_names = {f["name"] for f in fields if isinstance(f, dict)}
+                sensitive_hits = field_names & self._SENSITIVE_FIELDS
+                if not sensitive_hits:
+                    continue
+                # Build queries using common root query patterns for this type
+                root_guesses = [tname[0].lower() + tname[1:], tname.lower()]
+                for root in root_guesses:
+                    for sf in sensitive_hits:
+                        probes.append((
+                            f"{{ {root} {{ {sf} }} }}",
+                            f"{tname}.{sf} via root '{root}'",
+                        ))
+        else:
+            # No schema — brute-force common roots x sensitive fields
+            for root in self._COMMON_ROOT_QUERIES:
+                for sf in self._SENSITIVE_FIELDS:
+                    probes.append((
+                        f"{{ {root} {{ {sf} }} }}",
+                        f"{root}.{sf}",
+                    ))
+
+        for query_str, desc in probes:
+            if self._stopped():
+                break
+            resp = self._gql_post(url, {"query": query_str})
+            if not resp:
+                continue
+            try:
+                body = resp.json()
+            except Exception:
+                continue
+            # If the response contains actual data (not just errors) → bypass
+            if body.get("data") and not all(v is None for v in body["data"].values()):
+                findings.append(self._finding(
+                    url=url, vuln_type="graphql_field_authz",
+                    finding=f"Field-level authorization bypass — {desc} returned data [{url}]",
+                    severity="critical",
+                    proof=json.dumps(body.get("data", {}))[:400],
+                    payload=query_str[:200],
+                    status_code=resp.status_code,
+                ))
+
+        return findings
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TEST 14: MUTATION PROBING
+    # ══════════════════════════════════════════════════════════════════════════
+
+    _COMMON_MUTATIONS = [
+        "createUser", "updateUser", "deleteUser", "register", "signup",
+        "changePassword", "resetPassword", "changeEmail", "updateRole",
+        "setAdmin", "grantPermission", "revokePermission",
+        "createPost", "updatePost", "deletePost", "publishPost",
+        "transfer", "withdraw", "deposit", "createPayment",
+        "deleteAccount", "updateSettings", "changeConfig",
+        "addToCart", "checkout", "createOrder", "cancelOrder",
+        "uploadFile", "deleteFile", "invite", "removeUser",
+    ]
+
+    def _test_mutation_probing(self, url: str) -> list[dict]:
+        findings: list[dict] = []
+        if self._stopped():
+            return findings
+
+        mutation_names: list[str] = []
+
+        if self._schema and self._schema.get("mutationType"):
+            # Extract mutation fields from schema
+            mut_type_name = self._schema["mutationType"].get("name", "Mutation")
+            for t in self._schema.get("types", []):
+                if t.get("name") == mut_type_name:
+                    for f in t.get("fields") or []:
+                        if isinstance(f, dict) and f.get("name"):
+                            mutation_names.append(f["name"])
+                    break
+        if not mutation_names:
+            mutation_names = list(self._COMMON_MUTATIONS)
+
+        for mname in mutation_names:
+            if self._stopped():
+                break
+            query_str = f"mutation {{ {mname} }}"
+            resp = self._gql_post(url, {"query": query_str})
+            if not resp:
+                continue
+            try:
+                body = resp.json()
+            except Exception:
+                continue
+            # If response has data and no "Cannot query" style error → mutation accessible
+            errors_text = json.dumps(body.get("errors", []))
+            if body.get("data") is not None and "Cannot query" not in errors_text:
+                findings.append(self._finding(
+                    url=url, vuln_type="graphql_mutation_probe",
+                    finding=f"Unauthorized mutation accessible — '{mname}' [{url}]",
+                    severity="high",
+                    proof=json.dumps(body)[:400],
+                    payload=query_str,
+                    status_code=resp.status_code,
+                ))
+
+        return findings
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TEST 15: TYPE CONFUSION
+    # ══════════════════════════════════════════════════════════════════════════
+
+    _ERROR_PATTERNS = [
+        "Internal Server Error", "TypeError", "Cannot read property",
+        "stack", "traceback", "Traceback", "NullPointerException",
+        "INTERNAL_SERVER_ERROR", "RuntimeError",
+    ]
+
+    def _test_type_confusion(self, url: str) -> list[dict]:
+        findings: list[dict] = []
+        if self._stopped():
+            return findings
+
+        # Baseline
+        baseline_resp = self._gql_post(url, {"query": '{ __type(name: "Query") { name } }'})
+        if not baseline_resp:
+            return findings
+
+        # Type confusion payloads
+        confusion_payloads = [
+            ('{ __type(name: 123) { name } }',              "int where string"),
+            ('{ __type(name: ["a","b"]) { name } }',        "array where scalar"),
+            ('{ __type(name: {x: 1}) { name } }',           "object where scalar"),
+            ('{ __type(name: null) { name } }',              "null"),
+            ('{ __type(name: true) { name } }',              "boolean where string"),
+            ('{ __type(name: 99999999999999999999) { name } }', "very large int"),
+        ]
+
+        # If schema has enum types, add non-enum value payloads
+        if self._schema:
+            for t in self._schema.get("types", []):
+                if t.get("kind") == "ENUM" and not t.get("name", "").startswith("__"):
+                    ename = t["name"]
+                    confusion_payloads.append((
+                        f'{{ __type(name: "{ename}_INVALID_VALUE_XYZ") {{ name }} }}',
+                        f"invalid enum value for {ename}",
+                    ))
+                    break  # One enum probe is sufficient
+
+        for payload_str, desc in confusion_payloads:
+            if self._stopped():
+                break
+            resp = self._gql_post(url, {"query": payload_str})
+            if not resp:
+                continue
+
+            body = resp.text or ""
+            is_server_error = resp.status_code >= 500
+            has_leak = any(pat in body for pat in self._ERROR_PATTERNS)
+
+            if is_server_error or has_leak:
+                findings.append(self._finding(
+                    url=url, vuln_type="graphql_type_confusion",
+                    finding=f"Type confusion triggers server error — {desc} [{url}]",
+                    severity="medium",
+                    proof=body[:400],
+                    payload=payload_str,
+                    status_code=resp.status_code,
+                ))
+
+        return findings
+
+    # ══════════════════════════════════════════════════════════════════════════
     # TEST 12: GET-BASED QUERIES (handled in CSRF test above)
     # ══════════════════════════════════════════════════════════════════════════
 
     def _test_get_queries(self, url: str) -> list[dict]:
         # This is covered by _test_csrf_get — no duplicate
         return []
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TEST 16: SUBSCRIPTION ABUSE (WebSocket flooding)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    _SUBSCRIPTION_NAMES = [
+        "onUpdate", "onNotification", "onMessage", "onEvent", "onChange",
+        "newMessage", "itemAdded", "userUpdated",
+    ]
+
+    def _test_subscription_abuse(self, url: str) -> list[dict]:
+        findings: list[dict] = []
+        if self._stopped():
+            return findings
+
+        try:
+            import websocket
+        except ImportError:
+            return findings  # websocket-client not available — skip
+
+        # Derive WS URL from HTTP URL
+        ws_url = url.replace("https://", "wss://").replace("http://", "ws://")
+
+        for sub_name in self._SUBSCRIPTION_NAMES:
+            if self._stopped():
+                break
+
+            ws = None
+            accepted_count = 0
+            crash_detected = False
+            crash_proof = ""
+
+            try:
+                ws = websocket.create_connection(
+                    ws_url,
+                    timeout=5,
+                    subprotocols=["graphql-ws"],
+                )
+
+                # Send connection_init
+                ws.send(json.dumps({"type": "connection_init"}))
+                ack = ws.recv()
+                if "connection_ack" not in ack:
+                    continue  # Server didn't acknowledge — try next name
+
+                # Flood 50 subscription start messages
+                sub_query = f"subscription {{ {sub_name} {{ id }} }}"
+                for i in range(50):
+                    if self._stopped():
+                        break
+                    msg = json.dumps({
+                        "id": str(i),
+                        "type": "start",
+                        "payload": {"query": sub_query},
+                    })
+                    try:
+                        ws.send(msg)
+                        accepted_count += 1
+                    except Exception:
+                        break
+
+                # Read responses to check for errors / crashes
+                ws.settimeout(2)
+                for _ in range(10):
+                    try:
+                        resp_data = ws.recv()
+                        if any(p in resp_data for p in ("stack", "traceback", "Traceback", "INTERNAL")):
+                            crash_detected = True
+                            crash_proof = resp_data[:300]
+                            break
+                    except Exception:
+                        break
+
+            except Exception:
+                continue
+            finally:
+                if ws:
+                    try:
+                        ws.close()
+                    except Exception:
+                        pass
+
+            if crash_detected:
+                findings.append(self._finding(
+                    url=url, vuln_type="graphql_subscription_abuse",
+                    finding=f"GraphQL subscription crash — '{sub_name}' triggered server error via WebSocket [{url}]",
+                    severity="medium",
+                    proof=crash_proof,
+                    payload=f"subscription {{ {sub_name} {{ id }} }} x50",
+                    status_code=0,
+                ))
+
+            if accepted_count > 20:
+                findings.append(self._finding(
+                    url=url, vuln_type="graphql_subscription_abuse",
+                    finding=f"No subscription rate limit — {accepted_count}/50 subscriptions accepted for '{sub_name}' [{url}]",
+                    severity="medium",
+                    proof=f"Server accepted {accepted_count} concurrent subscriptions without throttling",
+                    payload=f"subscription {{ {sub_name} {{ id }} }} x{accepted_count}",
+                    status_code=0,
+                ))
+                break  # One finding is enough
+
+        return findings
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TEST 17: COMPLEXITY ATTACK (wide queries, pagination, fragment spreads)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _test_complexity_attack(self, url: str) -> list[dict]:
+        findings: list[dict] = []
+        if self._stopped():
+            return findings
+
+        attacks: list[tuple[str, str]] = [
+            # Wide query: 100 aliases of __typename
+            (
+                "{ " + " ".join(f"a{i}: __typename" for i in range(100)) + " }",
+                "100-alias wide query",
+            ),
+            # Connection pagination abuse
+            (
+                '{ __type(name: "Query") { fields(first: 9999) { name type { name fields { name } } } } }',
+                "pagination abuse (first: 9999)",
+            ),
+            # Nested fragment spread (10 spreads of same fragment)
+            (
+                "fragment F on Query { __typename }\n{ " + " ".join("...F" for _ in range(10)) + " }",
+                "10x fragment spread",
+            ),
+        ]
+
+        for query_str, desc in attacks:
+            if self._stopped():
+                break
+
+            t0 = time.time()
+            resp = self._gql_post(url, {"query": query_str})
+            elapsed = time.time() - t0
+
+            if not resp or resp.status_code != 200:
+                continue
+
+            body_len = len(resp.content) if resp.content else 0
+
+            if elapsed > 2.0:
+                findings.append(self._finding(
+                    url=url, vuln_type="graphql_complexity",
+                    finding=f"Complexity attack accepted — {desc} took {elapsed:.1f}s [{url}]",
+                    severity="medium",
+                    proof=f"Response time: {elapsed:.1f}s, body size: {body_len} bytes",
+                    payload=query_str[:200],
+                    resp_time_ms=elapsed * 1000,
+                    status_code=resp.status_code,
+                ))
+
+            if body_len > 100_000:
+                findings.append(self._finding(
+                    url=url, vuln_type="graphql_complexity",
+                    finding=f"Excessive response size — {desc} returned {body_len // 1024}KB [{url}]",
+                    severity="medium",
+                    proof=f"Response body: {body_len} bytes ({body_len // 1024}KB)",
+                    payload=query_str[:200],
+                    resp_time_ms=elapsed * 1000,
+                    status_code=resp.status_code,
+                ))
+
+        return findings
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TEST 18: FIELD BRUTE-FORCE ENUMERATION
+    # ══════════════════════════════════════════════════════════════════════════
+
+    _FIELD_NAMES = [
+        "user", "users", "me", "currentUser", "viewer", "account", "profile",
+        "admin", "admins", "login", "register", "signup", "authenticate",
+        "post", "posts", "article", "articles", "comment", "comments",
+        "product", "products", "order", "orders", "cart", "checkout",
+        "payment", "payments", "transaction", "transactions",
+        "message", "messages", "notification", "notifications",
+        "file", "files", "upload", "image", "images",
+        "search", "find", "list", "get", "fetch",
+        "config", "settings", "configuration", "preferences",
+        "role", "roles", "permission", "permissions",
+        "token", "tokens", "session", "sessions",
+        "log", "logs", "audit", "events", "analytics",
+        "health", "status", "version", "info", "debug",
+        "node", "nodes", "edge", "edges", "connection",
+        "category", "categories", "tag", "tags", "label",
+        "team", "teams", "organization", "organizations", "workspace",
+        "project", "projects", "task", "tasks", "issue", "issues",
+        "invoice", "invoices", "subscription", "subscriptions",
+        "webhook", "webhooks", "integration", "integrations",
+        "report", "reports", "dashboard", "metric", "metrics",
+        "api", "schema", "query", "mutation",
+        "customer", "customers", "vendor", "vendors", "supplier",
+        "inventory", "stock", "warehouse", "shipping",
+        "review", "reviews", "rating", "ratings", "feedback",
+        "document", "documents", "page", "pages", "content",
+        "email", "emails", "sms", "phone",
+        "address", "addresses", "location", "locations",
+        "country", "countries", "currency", "currencies",
+        "language", "languages", "translation", "translations",
+    ]
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TEST 19: DIRECTIVE INJECTION
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _test_directive_injection(self, url: str) -> list[dict]:
+        findings = []
+
+        probes = [
+            # @deprecated is SDL-only; compliant servers reject it in query position
+            (
+                {"query": "{ __typename @deprecated }"},
+                "@deprecated in query position (SDL-only directive)",
+            ),
+            # Unknown directives should be rejected; lax servers silently ignore them
+            (
+                {"query": '{ __typename @bypass(authorization: true) }'},
+                "@bypass(authorization: true) — unknown directive accepted without error",
+            ),
+            # @skip with explicit false variable — tests whether directive variable injection works
+            (
+                {
+                    "query": "query($x: Boolean!) { __typename @skip(if: $x) }",
+                    "variables": {"x": False},
+                },
+                "@skip(if: $x) variable injection — field skipped via client-supplied variable",
+            ),
+        ]
+
+        for payload, description in probes:
+            if self._stopped():
+                break
+            resp = self._gql_post(url, payload)
+            if not resp or resp.status_code != 200:
+                continue
+            try:
+                body = resp.json()
+            except Exception:
+                continue
+            # Signal: server returned data without errors for a semantically invalid directive
+            if "data" in body and not body.get("errors"):
+                findings.append(self._finding(
+                    url=url,
+                    vuln_type="graphql_directive_injection",
+                    finding=f"GraphQL directive validation lax — {description} [{url}]",
+                    severity="medium",
+                    proof=description,
+                    payload=str(payload.get("query", ""))[:200],
+                    status_code=resp.status_code,
+                ))
+                break  # one finding per URL is enough
+
+        return findings
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TEST 20: FRAGMENT CYCLOMATIC COMPLEXITY
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _test_fragment_complexity(self, url: str) -> list[dict]:
+        findings = []
+        _payload_desc = "query { ...FC_Root } — 13 fragments, 3-level binary fan-out"
+
+        # Baseline RTT to avoid flagging slow networks rather than slow server processing
+        t_base = time.time()
+        baseline_ok = self._gql_post(url, {"query": "{ __typename }"}) is not None
+        baseline_s = time.time() - t_base
+
+        if not baseline_ok:
+            return findings
+
+        t0 = time.time()
+        resp = self._gql_post(url, {"query": _FRAGMENT_COMPLEXITY_QUERY})
+        elapsed = time.time() - t0
+
+        if not resp:
+            return findings
+
+        # Flag if complexity query takes >3× baseline AND > 2 s in absolute terms
+        if resp.status_code == 200 and elapsed > 2.0 and elapsed > baseline_s * 3:
+            findings.append(self._finding(
+                url=url,
+                vuln_type="graphql_fragment_complexity",
+                finding=(
+                    f"GraphQL fragment complexity attack — 13-fragment wide fan-out"
+                    f" processed in {elapsed:.1f}s (baseline {baseline_s * 1000:.0f}ms) [{url}]"
+                ),
+                severity="medium",
+                proof=f"Fan-out query: {elapsed:.1f}s vs baseline {baseline_s * 1000:.0f}ms",
+                payload=_payload_desc,
+                resp_time_ms=elapsed * 1000,
+                status_code=resp.status_code,
+            ))
+        elif resp.status_code not in (200, 400):
+            # Server crashed or returned unexpected status — also worth flagging
+            findings.append(self._finding(
+                url=url,
+                vuln_type="graphql_fragment_complexity",
+                finding=(
+                    f"GraphQL fragment complexity — unexpected server response"
+                    f" HTTP {resp.status_code} [{url}]"
+                ),
+                severity="medium",
+                proof=f"Wide fragment fan-out returned HTTP {resp.status_code}",
+                payload=_payload_desc,
+                resp_time_ms=elapsed * 1000,
+                status_code=resp.status_code,
+            ))
+
+        return findings
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TEST 21: AUTOMATIC PERSISTED QUERY (APQ) BYPASS
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _test_apq_bypass(self, url: str) -> list[dict]:
+        findings = []
+
+        random_hash = hashlib.sha256(uuid.uuid4().bytes).hexdigest()
+        probe1 = {"extensions": {"persistedQuery": {"version": 1, "sha256Hash": random_hash}}}
+        resp1 = self._gql_post(url, probe1)
+        if not resp1 or resp1.status_code != 200:
+            return findings
+
+        try:
+            body1 = resp1.json()
+        except Exception:
+            return findings
+
+        errors1 = body1.get("errors", [])
+        errors_text = json.dumps(errors1).lower()
+        apq_enabled = any(k in errors_text for k in ("persistedquery", "persisted query", "query not found"))
+
+        # If server returned data for a random hash without a query — pre-loaded query cache leak
+        if "data" in body1 and not errors1:
+            findings.append(self._finding(
+                url=url,
+                vuln_type="graphql_apq_bypass",
+                finding=f"GraphQL APQ — server returned data for random unknown hash [{url}]",
+                severity="critical",
+                proof=f"Hash {random_hash[:16]}… returned data: {str(body1.get('data'))[:100]}",
+                payload=json.dumps(probe1)[:200],
+                status_code=resp1.status_code,
+            ))
+            return findings
+
+        if not apq_enabled:
+            return findings
+
+        real_query = "{ __typename }"
+        wrong_hash = hashlib.sha256(b"dast_apq_mismatch_probe").hexdigest()
+        probe2 = {
+            "query": real_query,
+            "extensions": {"persistedQuery": {"version": 1, "sha256Hash": wrong_hash}},
+        }
+        resp2 = self._gql_post(url, probe2)
+        if resp2 and resp2.status_code == 200:
+            try:
+                body2 = resp2.json()
+                if "data" in body2 and not body2.get("errors"):
+                    findings.append(self._finding(
+                        url=url,
+                        vuln_type="graphql_apq_bypass",
+                        finding=(
+                            f"GraphQL APQ hash validation bypass — server accepted query"
+                            f" with mismatched sha256Hash [{url}]"
+                        ),
+                        severity="high",
+                        proof=f"Sent hash {wrong_hash[:16]}… but query was '{real_query}' — server returned data",
+                        payload=json.dumps(probe2)[:200],
+                        status_code=resp2.status_code,
+                    ))
+            except Exception:
+                pass
+
+        # Only emit info if no higher-severity bypass finding already fired
+        if not any(f["severity"] in ("high", "critical") for f in findings):
+            findings.append(self._finding(
+                url=url,
+                vuln_type="graphql_apq_bypass",
+                finding=f"GraphQL Automatic Persisted Queries (APQ) enabled [{url}]",
+                severity="info",
+                proof="Server responded with PersistedQueryNotFound for unknown hash",
+                payload=json.dumps(probe1)[:200],
+                status_code=resp1.status_code,
+            ))
+
+        return findings
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TEST 22: UNION TYPE BOUNDARY BYPASS
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _test_union_bypass(self, url: str) -> list[dict]:
+        findings = []
+
+        # Cheap pre-check: strict servers reject inline fragments on unknown types with an error.
+        # If the server errors on a definitely-nonexistent type, skip the 9-probe loop entirely.
+        gate_resp = self._gql_post(url, {"query": "{ __typename ... on _DAST_NonExistentType123XYZ { id } }"})
+        if gate_resp and gate_resp.status_code == 200:
+            try:
+                gate_body = gate_resp.json()
+                if gate_body.get("errors") and not gate_body.get("data"):
+                    return findings  # server validates inline fragment types — no bypass possible
+            except Exception:
+                pass
+
+        for type_name in _UNION_PROBE_TYPES:
+            if self._stopped():
+                break
+            q = {
+                "query": (
+                    f"{{ __typename ... on {type_name}"
+                    f" {{ id email role permissions isAdmin adminFlag }} }}"
+                )
+            }
+            resp = self._gql_post(url, q)
+            if not resp or resp.status_code != 200:
+                continue
+            try:
+                body = resp.json()
+            except Exception:
+                continue
+
+            data = body.get("data") or {}
+            # Strip __typename — look for any privileged field that came back non-null
+            leaked = {k: v for k, v in data.items() if k != "__typename" and v is not None}
+            if leaked:
+                findings.append(self._finding(
+                    url=url,
+                    vuln_type="graphql_union_bypass",
+                    finding=(
+                        f"GraphQL union type boundary bypass — fields of {type_name}"
+                        f" accessible via inline fragment [{url}]"
+                    ),
+                    severity="high",
+                    proof=f"... on {type_name} returned: {json.dumps(leaked)[:200]}",
+                    payload=f"... on {type_name} {{ id email role permissions isAdmin adminFlag }}",
+                    status_code=resp.status_code,
+                ))
+                break  # one confirmed bypass is sufficient
+
+        return findings
+
+    def _test_field_bruteforce(self, url: str) -> list[dict]:
+        findings: list[dict] = []
+        if self._stopped():
+            return findings
+
+        # Only run when introspection is disabled
+        if self._schema is not None:
+            return findings
+
+        discovered: list[str] = []
+        suggested: list[str] = []
+
+        # Process in batches of 5 for speed
+        batch_size = 5
+        for i in range(0, len(self._FIELD_NAMES), batch_size):
+            if self._stopped():
+                break
+            batch = self._FIELD_NAMES[i:i + batch_size]
+
+            # Build a batched query with aliases
+            parts = []
+            for idx, name in enumerate(batch):
+                parts.append(f"f{idx}: {name} {{ id }}")
+            batch_query = "{ " + " ".join(parts) + " }"
+
+            resp = self._gql_post(url, {"query": batch_query})
+            if not resp:
+                continue
+
+            try:
+                body = resp.json()
+            except Exception:
+                continue
+
+            # Check data for non-null fields
+            data = body.get("data") or {}
+            for idx, name in enumerate(batch):
+                alias = f"f{idx}"
+                if alias in data and data[alias] is not None:
+                    discovered.append(name)
+
+            # Check errors for "did you mean" suggestions
+            errors_text = json.dumps(body.get("errors", []))
+            did_you_mean = re.findall(r'[Dd]id you mean\s+["\']?(\w+)', errors_text)
+            for suggestion in did_you_mean:
+                if suggestion not in suggested and suggestion not in discovered:
+                    suggested.append(suggestion)
+
+            # If batch query fails entirely, fall back to individual queries
+            if resp.status_code != 200 and resp.status_code != 400:
+                for name in batch:
+                    if self._stopped():
+                        break
+                    single_resp = self._gql_post(url, {"query": f"{{ {name} }}"})
+                    if not single_resp:
+                        continue
+                    try:
+                        single_body = single_resp.json()
+                    except Exception:
+                        continue
+                    single_data = single_body.get("data") or {}
+                    if single_data and not all(v is None for v in single_data.values()):
+                        discovered.append(name)
+                    single_errors = json.dumps(single_body.get("errors", []))
+                    for s in re.findall(r'[Dd]id you mean\s+["\']?(\w+)', single_errors):
+                        if s not in suggested and s not in discovered:
+                            suggested.append(s)
+
+        all_found = discovered + suggested
+        if all_found:
+            proof_parts = []
+            if discovered:
+                proof_parts.append(f"Confirmed fields: {', '.join(discovered[:30])}")
+            if suggested:
+                proof_parts.append(f"Suggested fields: {', '.join(suggested[:20])}")
+
+            findings.append(self._finding(
+                url=url, vuln_type="graphql_field_enum",
+                finding=f"GraphQL field brute-force discovered {len(discovered)} fields"
+                        f"{f' + {len(suggested)} suggestions' if suggested else ''}"
+                        f" (introspection disabled) [{url}]",
+                severity="low",
+                proof="; ".join(proof_parts)[:500],
+                payload=f"Tested {len(self._FIELD_NAMES)} field names in batches of {batch_size}",
+                status_code=0,
+            ))
+
+        return findings
 
 
 # ── Convenience function ─────────────────────────────────────────────────────

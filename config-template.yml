@@ -1,0 +1,127 @@
+# DAST Scanner Configuration Template
+# Copy this file and customize for your target.
+#
+# Database:
+#   Set DATABASE_URL env var to use PostgreSQL (recommended for production).
+#   When unset, falls back to SQLite at ~/.dast/dast_master.db (dev/local only).
+#   Example: DATABASE_URL=postgresql://dast:secret@localhost:5432/dast
+#
+#   Pool sizing (optional env vars):
+#     DB_POOL_MIN=2   (minimum idle connections, default 2)
+#     DB_POOL_MAX=20  (maximum connections, default 20)
+
+scan:
+  # Scan policy: quick | standard | full | api | stealth
+  policy: standard
+  # HTTP request timeout in seconds (1-120)
+  timeout: 10
+  # Maximum pages to crawl (0 = unlimited for api mode)
+  max_pages: 100
+  # Maximum crawl depth
+  max_depth: 5
+  # Concurrent workers for fuzzing/scanning
+  workers: 10
+  # Keep false unless scanning an approved staging target with disposable data.
+  # Blocks active fuzzing of logout, payment, refund, transfer, password reset,
+  # role, and account-changing endpoints by default.
+  allow_dangerous_endpoints: false
+
+checks:
+  # List of vuln_type keys to skip (e.g., ["xss_reflected", "sqli_error"])
+  disable: []
+  # If non-empty, ONLY run these checks (overrides disable)
+  enable_only: []
+
+scope:
+  # URL patterns to include (glob-style, e.g., "https://example.com/api/*")
+  include: []
+  # URL patterns to exclude (e.g., "/logout", "/admin/*")
+  exclude: []
+  # File extensions to skip during crawling
+  exclude_extensions:
+    - ".jpg"
+    - ".png"
+    - ".gif"
+    - ".css"
+    - ".woff2"
+    - ".ico"
+    - ".svg"
+
+auth:
+  # ── Static token / credential auth ────────────────────────────────────────
+  # Auth type: none | bearer | cookie | basic | header
+  # Use these when you already have a token/cookie and don't need to log in.
+  type: none
+
+  # type: bearer  — set Authorization: Bearer <token> on every request
+  token: ""
+
+  # type: basic   — HTTP Basic auth
+  username: ""
+  password: ""
+
+  # type: cookie  — inject a single session cookie
+  cookie_name: ""
+  cookie_value: ""
+
+  # type: header  — arbitrary custom auth header (e.g. X-API-Key)
+  header_name: ""
+  header_value: ""
+
+  # ── Dynamic login flows ────────────────────────────────────────────────────
+  # Use these when the scanner must perform a login before scanning.
+  # Each block is independent — set only the one that matches your app.
+
+  # Form / browser login  (Playwright with requests fallback)
+  # Equivalent to: --login-url / --login-user / --login-pass
+  # login_url: "https://example.com/login"
+  # login_user: "admin@example.com"
+  # login_pass: "hunter2"
+  # user_field: ""      # CSS selector for username input (auto-detected if blank)
+  # pass_field: ""      # CSS selector for password input (auto-detected if blank)
+  # submit_field: ""    # CSS selector for submit button  (auto-detected if blank)
+
+  # JSON API token login  (POST credentials → capture Bearer token from response)
+  # Equivalent to: --token-url / --token-field / --token-pass-field / --token-path
+  # token_url: "https://api.example.com/auth/login"
+  # token_field: "username"         # JSON key for username in POST body
+  # token_pass_field: "password"    # JSON key for password in POST body
+  # token_path: "data.access_token" # Dot-path to token in JSON response (auto-detect if blank)
+  # login_user: "admin"
+  # login_pass: "hunter2"
+
+  # Multi-step scripted auth  (OAuth2, MFA, SSO flows)
+  # Equivalent to: --auth-script
+  # auth_script: "./auth-scripts/okta-saml.json"
+  # login_user: "admin"   # optional — substituted as {{username}} in the script
+  # login_pass: "hunter2" # optional — substituted as {{password}} in the script
+
+  # API key rotation  (programmatic only — set multiple keys in AuthHandler)
+  # Use AuthHandler.set_api_key_rotation(keys=["key1","key2"], header_name="X-API-Key")
+  # to rotate through API keys and avoid rate-limiting during long scans.
+  # Not configurable via YAML — call from a --auth-script or custom Python wrapper.
+
+  # ── Multi-user / multi-role testing ───────────────────────────────────────
+  # Provide a JSON file defining multiple users so the scanner tests access
+  # control across roles (admin, user, guest, unauthenticated baseline).
+  # Equivalent to: --users-file / -U
+  # users_file: "./users.json"
+  # users: []   # subset of users from users_file to run (empty = all)
+
+wordlists:
+  # Path to custom forced browse wordlist
+  forced_browse: ""
+  # Path to password wordlist for brute force checks
+  passwords: ""
+  # Path to username wordlist
+  usernames: ""
+
+reporting:
+  # Output formats: html, sarif, pdf, json, csv
+  format:
+    - html
+    - sarif
+  # Directory for report files
+  output_dir: ./reports
+  # CI failure threshold: low | medium | high | critical
+  fail_on: high

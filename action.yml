@@ -1,0 +1,105 @@
+name: "DAST Standalone Scan"
+description: "Run a headless DAST security scan against a target URL"
+branding:
+  icon: "shield"
+  color: "red"
+
+inputs:
+  target:
+    description: "Target URL to scan"
+    required: true
+  scan_config:
+    description: "Path to YAML scan configuration file"
+    required: false
+  output:
+    description: "JSON report output path"
+    required: false
+    default: "dast-report.json"
+  output_sarif:
+    description: "SARIF report output path (for Code Scanning)"
+    required: false
+    default: "dast-report.sarif"
+  fail_on:
+    description: "Severity threshold for CI failure (low/medium/high/critical)"
+    required: false
+    default: "high"
+  policy:
+    description: "Path to policy JSON for per-rule severity overrides"
+    required: false
+  suppress:
+    description: "Path to suppression JSON for false positive filtering"
+    required: false
+  max_pages:
+    description: "Maximum pages to crawl"
+    required: false
+    default: "200"
+  timeout:
+    description: "HTTP timeout in seconds"
+    required: false
+    default: "10"
+  extra_args:
+    description: "Additional CLI arguments"
+    required: false
+
+outputs:
+  finding_count:
+    description: "Total number of findings"
+  exit_code:
+    description: "Scanner exit code (0=pass, 1=fail, 2=warn)"
+  sarif_path:
+    description: "Path to generated SARIF report"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install dependencies
+      shell: bash
+      run: pip install -r ${{ github.action_path }}/requirements.txt
+
+    - name: Run DAST scan
+      id: scan
+      shell: bash
+      run: |
+        set +e
+        ARGS="--target ${{ inputs.target }}"
+        ARGS="$ARGS --output ${{ inputs.output }}"
+        ARGS="$ARGS --output-sarif ${{ inputs.output_sarif }}"
+        ARGS="$ARGS --fail-on ${{ inputs.fail_on }}"
+        ARGS="$ARGS --max-pages ${{ inputs.max_pages }}"
+        ARGS="$ARGS --timeout ${{ inputs.timeout }}"
+
+        if [ -n "${{ inputs.scan_config }}" ]; then
+          ARGS="$ARGS --scan-config ${{ inputs.scan_config }}"
+        fi
+        if [ -n "${{ inputs.policy }}" ]; then
+          ARGS="$ARGS --policy ${{ inputs.policy }}"
+        fi
+        if [ -n "${{ inputs.suppress }}" ]; then
+          ARGS="$ARGS --suppress ${{ inputs.suppress }}"
+        fi
+
+        python3 ${{ github.action_path }}/main.py --headless $ARGS ${{ inputs.extra_args }}
+        EXIT_CODE=$?
+
+        echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+        echo "sarif_path=${{ inputs.output_sarif }}" >> $GITHUB_OUTPUT
+
+        # Count findings from JSON report
+        if [ -f "${{ inputs.output }}" ]; then
+          COUNT=$(python3 -c "import json; d=json.load(open('${{ inputs.output }}')); print(len(d.get('findings',[])))" 2>/dev/null || echo "0")
+          echo "finding_count=$COUNT" >> $GITHUB_OUTPUT
+        fi
+
+        exit $EXIT_CODE
+
+    - name: Upload SARIF to Code Scanning
+      if: always() && inputs.output_sarif != ''
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ inputs.output_sarif }}
+        category: "dast-standalone"

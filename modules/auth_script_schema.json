@@ -1,0 +1,254 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "auth_script_schema.json",
+  "title": "DAST Auth Script",
+  "description": "Multi-step authentication flow definition for the DAST scanner's AuthScriptRunner. Place this file anywhere and pass its path via --auth-script or the auth.script_path config key. Variables in {{double_braces}} are interpolated at runtime.",
+  "type": "object",
+  "required": ["steps"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Human-readable name shown in scan logs (e.g. 'Corporate SSO Login')"
+    },
+    "variables": {
+      "type": "object",
+      "description": "Initial variable bindings available as {{var_name}} in all step fields. Override at runtime via extra_vars.",
+      "additionalProperties": { "type": "string" },
+      "examples": [
+        { "username": "admin", "password": "secret", "totp_secret": "BASE32KEYHERE", "target": "https://app.example.com" }
+      ]
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Ordered list of authentication steps. Steps run sequentially; a failure aborts the script.",
+      "items": {
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["request", "browser", "totp", "set_header", "set_cookie", "sleep", "extract"],
+            "description": "Step kind. Determines which other properties are required."
+          },
+          "name": {
+            "type": "string",
+            "description": "Optional label shown in scan logs for this step"
+          }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "type": { "const": "request" } }, "required": ["type"] },
+            "then": {
+              "properties": {
+                "method": {
+                  "type": "string",
+                  "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"],
+                  "default": "GET",
+                  "description": "HTTP method"
+                },
+                "url": {
+                  "type": "string",
+                  "description": "Absolute URL. Supports {{variable}} interpolation, e.g. {{target}}/login"
+                },
+                "headers": {
+                  "type": "object",
+                  "additionalProperties": { "type": "string" },
+                  "description": "Extra request headers. Values support {{variable}} interpolation."
+                },
+                "body": {
+                  "type": "string",
+                  "description": "Raw request body (for form-encoded or custom content). Supports {{variable}} interpolation."
+                },
+                "json": {
+                  "type": "object",
+                  "description": "JSON body (sets Content-Type: application/json automatically). Values support {{variable}} interpolation."
+                },
+                "follow_redirects": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "Whether to follow HTTP redirects"
+                },
+                "extract": {
+                  "$ref": "#/$defs/extract_map",
+                  "description": "Extract values from the response into variables"
+                }
+              },
+              "required": ["url"]
+            }
+          },
+          {
+            "if": { "properties": { "type": { "const": "browser" } }, "required": ["type"] },
+            "then": {
+              "description": "Playwright browser action. Requires: pip install playwright && playwright install chromium",
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "enum": ["navigate", "fill", "click", "wait", "submit"],
+                  "description": "Browser interaction kind"
+                },
+                "url": {
+                  "type": "string",
+                  "description": "Target URL for 'navigate' action"
+                },
+                "selector": {
+                  "type": "string",
+                  "description": "CSS selector for 'fill', 'click', 'wait' actions"
+                },
+                "value": {
+                  "type": "string",
+                  "description": "Text to fill (for 'fill' action). Supports {{variable}} interpolation."
+                },
+                "fields": {
+                  "type": "object",
+                  "additionalProperties": { "type": "string" },
+                  "description": "Map of CSS-selector → value for filling multiple fields in one step"
+                }
+              }
+            }
+          },
+          {
+            "if": { "properties": { "type": { "const": "totp" } }, "required": ["type"] },
+            "then": {
+              "description": "Generate a TOTP code from a base32 secret and store it in a variable",
+              "properties": {
+                "secret": {
+                  "type": "string",
+                  "description": "Base32 TOTP secret. Supports {{variable}} interpolation, e.g. {{totp_secret}}"
+                },
+                "var": {
+                  "type": "string",
+                  "description": "Variable name to store the generated 6-digit code, e.g. 'otp_code'"
+                }
+              },
+              "required": ["secret", "var"]
+            }
+          },
+          {
+            "if": { "properties": { "type": { "const": "set_header" } }, "required": ["type"] },
+            "then": {
+              "description": "Set a persistent header on the scan session (e.g. Authorization: Bearer {{token}})",
+              "properties": {
+                "header": {
+                  "type": "string",
+                  "description": "Header name, e.g. 'Authorization'"
+                },
+                "value": {
+                  "type": "string",
+                  "description": "Header value. Supports {{variable}} interpolation."
+                }
+              },
+              "required": ["header", "value"]
+            }
+          },
+          {
+            "if": { "properties": { "type": { "const": "set_cookie" } }, "required": ["type"] },
+            "then": {
+              "description": "Set a persistent cookie on the scan session",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "Cookie name, e.g. 'session'"
+                },
+                "value": {
+                  "type": "string",
+                  "description": "Cookie value. Supports {{variable}} interpolation."
+                }
+              },
+              "required": ["name", "value"]
+            }
+          },
+          {
+            "if": { "properties": { "type": { "const": "sleep" } }, "required": ["type"] },
+            "then": {
+              "description": "Pause execution for N seconds (useful for rate-limited MFA flows)",
+              "properties": {
+                "seconds": {
+                  "type": "number",
+                  "minimum": 0,
+                  "description": "Duration in seconds (fractional values allowed)"
+                }
+              },
+              "required": ["seconds"]
+            }
+          },
+          {
+            "if": { "properties": { "type": { "const": "extract" } }, "required": ["type"] },
+            "then": {
+              "description": "Extract values from the last HTTP response into variables (also available inline on 'request' steps)",
+              "properties": {
+                "vars": {
+                  "$ref": "#/$defs/extract_map"
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "extract_map": {
+      "type": "object",
+      "description": "Map of variable_name → extraction rule. Extracted values are available as {{variable_name}} in subsequent steps.",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["from"],
+        "properties": {
+          "from": {
+            "type": "string",
+            "enum": ["regex", "jsonpath", "header", "cookie"],
+            "description": "Extraction source"
+          },
+          "pattern": {
+            "type": "string",
+            "description": "Regex pattern (with one capture group) when from=regex, e.g. 'name=\"csrf\" value=\"(.+?)\"'"
+          },
+          "path": {
+            "type": "string",
+            "description": "JSON key path when from=jsonpath, e.g. 'data.access_token'"
+          },
+          "name": {
+            "type": "string",
+            "description": "Header or cookie name when from=header or from=cookie"
+          }
+        }
+      },
+      "examples": [
+        {
+          "csrf":  { "from": "regex",    "pattern": "name=\"csrf\" value=\"(.+?)\"" },
+          "token": { "from": "jsonpath", "path": "access_token" },
+          "sid":   { "from": "cookie",   "name": "session" }
+        }
+      ]
+    }
+  },
+  "examples": [
+    {
+      "name": "Username + Password + TOTP",
+      "variables": { "username": "admin", "password": "secret", "totp_secret": "BASE32KEY", "target": "https://app.example.com" },
+      "steps": [
+        { "type": "request", "method": "GET",  "url": "{{target}}/login",
+          "extract": { "csrf": { "from": "regex", "pattern": "name=\"csrf\" value=\"(.+?)\"" } } },
+        { "type": "request", "method": "POST", "url": "{{target}}/login",
+          "headers": { "Content-Type": "application/x-www-form-urlencoded" },
+          "body": "username={{username}}&password={{password}}&csrf={{csrf}}" },
+        { "type": "totp",    "secret": "{{totp_secret}}", "var": "otp_code" },
+        { "type": "request", "method": "POST", "url": "{{target}}/mfa",
+          "json": { "code": "{{otp_code}}" },
+          "extract": { "token": { "from": "jsonpath", "path": "access_token" } } },
+        { "type": "set_header", "header": "Authorization", "value": "Bearer {{token}}" }
+      ]
+    },
+    {
+      "name": "Session Cookie Login",
+      "variables": { "target": "https://app.example.com", "username": "admin", "password": "secret" },
+      "steps": [
+        { "type": "request", "method": "POST", "url": "{{target}}/api/login",
+          "json": { "username": "{{username}}", "password": "{{password}}" },
+          "extract": { "session_id": { "from": "cookie", "name": "session" } } },
+        { "type": "set_cookie", "name": "session", "value": "{{session_id}}" }
+      ]
+    }
+  ]
+}

