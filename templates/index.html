@@ -1235,6 +1235,9 @@ select.field-mini { cursor: pointer; }
           </div>
           <div id="ov-live-tasks" style="display:flex;flex-wrap:wrap;gap:6px;"></div>
         </div>
+        <div id="ov-raw-records-definition" style="font-size:11px;color:var(--muted);line-height:1.5;margin:-4px 0 14px;">
+          Raw records are noisy scanner hits and false-positive candidates; unique findings are the filtered true-positive issues shown.
+        </div>
         <style>
           @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
           .live-task-chip { display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:12px;font-size:11px;border:1px solid var(--border); }
@@ -1366,6 +1369,7 @@ select.field-mini { cursor: pointer; }
             <button class="btn-ghost btn-sm" onclick="downloadSarif()">📋 SARIF</button>
             <button class="btn-ghost btn-sm" onclick="downloadXml()">📋 XML</button>
             <button class="btn-ghost btn-sm btn-fabric" onclick="openFabricSummary()">🧵 Fabric Analysis</button>
+            <button class="btn-ghost btn-sm" onclick="switchSection('tools');loadRequirementsStatus()">🧩 Requirements</button>
           </div>
         </div>
 
@@ -1872,6 +1876,26 @@ select.field-mini { cursor: pointer; }
             <div id="capabilities-status" class="cap-grid">
               <div class="dimmed" style="font-size:11px;">Loading…</div>
             </div>
+          </div>
+        </div>
+
+        <!-- Requirements installer (full width) -->
+        <div class="tool-block full-width">
+          <div class="tool-block-header">
+            <div class="tool-block-title">🧩 Requirements & External Tools</div>
+            <div style="display:flex;gap:6px;align-items:center;">
+              <button class="btn-ghost btn-xs" onclick="loadRequirementsStatus()">↻ Refresh</button>
+              <button class="btn-scan btn-sm" id="btn-install-requirements" onclick="installMissingRequirements()">Install missing</button>
+            </div>
+          </div>
+          <div class="tool-block-body">
+            <div class="tool-hint" style="margin-bottom:8px;">
+              Shows missing Python packages and optional scanner binaries. The install button runs a fixed server-side installer plan for installable missing items.
+            </div>
+            <div id="requirements-status" class="cap-grid">
+              <div class="dimmed" style="font-size:11px;">Loading…</div>
+            </div>
+            <div id="requirements-install-log" class="fd-code-block" style="display:none;margin-top:10px;max-height:180px;overflow:auto;white-space:pre-wrap;font-size:10px;"></div>
           </div>
         </div>
 
@@ -3280,6 +3304,9 @@ function updateProgress(data) {
   const total = data.total || 0;
   const done  = data.done  || 0;
   const eng   = data.engine || {};
+  const uniqueFindings = Number.isFinite(Number(data.unique_findings))
+    ? Number(data.unique_findings)
+    : (data.findings || 0);
 
   // Progress bar: 0% when idle/done, live progress during active scan only
   const enginePhases = ['starting','preflight','crawling','passive','fingerprinting','deep_discovery','fuzzing','owasp_checks','api_race_testing','external_tools','post_processing','complete'];
@@ -3307,7 +3334,7 @@ function updateProgress(data) {
       }
       parts.push(`engine: ${engLabel}`);
     }
-    parts.push(`${data.findings} findings`);
+    parts.push(`${uniqueFindings} findings`);
     lbl = parts.join(' · ');
   } else {
     lbl = total > 0 ? `${done}/${total} done` : 'Ready';
@@ -3321,12 +3348,14 @@ function updateProgress(data) {
   if (data.running > 0) { br.style.display = ''; if(brt) brt.textContent = data.running; }
   else br.style.display = 'none';
   if (!_histViewMode) {
-    if (data.findings > 0) { bf.style.display = ''; if(bft) bft.textContent = data.findings; }
+    if (uniqueFindings > 0) { bf.style.display = ''; if(bft) bft.textContent = uniqueFindings; }
     else bf.style.display = 'none';
   }
 
   const fc = document.getElementById('findings-count-tab');
-  if (fc && !_histViewMode) fc.textContent = data.findings > 0 ? ` (${data.findings})` : '';
+  if (fc && !_histViewMode) {
+    fc.textContent = uniqueFindings > 0 ? ` (${_formatFindingBadgeTotals({ unique: uniqueFindings })})` : '';
+  }
 
   // Update chains count badge from engine progress
   const chainCount = data.engine?.attack_chains || 0;
@@ -3402,14 +3431,22 @@ function _findingTotalsFromResponse(r, fallbackCount = 0) {
   const raw = r && !r.error && Number.isFinite(Number(r.total_raw))
     ? Number(r.total_raw)
     : (list ? list.reduce((s, f) => s + (f.count || 1), 0) : unique);
-  return { unique, total: Math.max(raw, unique) };
+  const rawRecords = Math.max(raw, unique);
+  return { unique, rawRecords, total: rawRecords };
 }
 
-function _formatFindingTotals(totals) {
+function _formatFindingOverviewTotals(totals) {
   const unique = totals.unique || 0;
-  const total = totals.total || unique;
-  if (total > unique) return `${unique} unique · ${total} total`;
+  const rawRecords = totals.rawRecords || totals.total || unique;
+  if (rawRecords > unique) {
+    return `${unique} unique finding${unique !== 1 ? 's' : ''} · ${rawRecords} raw record${rawRecords !== 1 ? 's' : ''}`;
+  }
   return `${unique} finding${unique !== 1 ? 's' : ''}`;
+}
+
+function _formatFindingBadgeTotals(totals) {
+  const unique = totals.unique || 0;
+  return `${unique} unique`;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -3425,9 +3462,9 @@ async function refreshOverview() {
   const overviewEng = statusOk ? (status.engine || {}) : {};
   const overviewFindingTotals = _findingTotalsFromResponse(
     findings,
-    statusOk ? (status.findings || overviewEng.findings_count || 0) : 0
+    statusOk ? (status.unique_findings || status.findings || overviewEng.findings_count || 0) : 0
   );
-  const overviewFindingsText = _formatFindingTotals(overviewFindingTotals);
+  const overviewFindingsText = _formatFindingOverviewTotals(overviewFindingTotals);
 
   if (caps && !caps.error) {
     const el = document.getElementById('ov-agents');
@@ -3751,6 +3788,7 @@ async function refreshOverview() {
         <span>${pg} pages crawled</span>
         <span style="color:var(--muted)">·</span>
         <span>Tools: <b style="color:${tr!=='none'?'var(--green)':'var(--muted)'}">${tr}</b></span>
+        <span style="flex-basis:100%;color:var(--muted);font-size:10px;">Raw records are noisy scanner hits and false-positive candidates; unique findings are the filtered true-positive issues shown.</span>
       </div>`;
     })() : '';
 
@@ -4190,22 +4228,20 @@ async function loadFindings() {
   if (!r || r.error) return;
   const findings = r.findings || [];
   const totals = _findingTotalsFromResponse(r);
-  const instanceTotal = totals.total;
+  const instanceTotal = totals.rawRecords || totals.total;
   renderFindings(findings);
   const ctx = document.getElementById('findings-scan-ctx');
   if (ctx) { ctx.style.display = 'none'; ctx.textContent = ''; ctx.title = ''; }
   updateSeverityStats(findings, instanceTotal);
 
-  // Tab badge: "31 unique · 1120 total"  Badge: raw instance count
+  // Tab badge stays concise; detailed count explanation lives on the Overview page.
   const uniqueCount = totals.unique;
   const fc = document.getElementById('findings-count-tab');
   if (fc) fc.textContent = uniqueCount > 0
-    ? instanceTotal > uniqueCount
-      ? ` (${uniqueCount} unique · ${instanceTotal} total)`
-      : ` (${uniqueCount})`
+    ? ` (${_formatFindingBadgeTotals(totals)})`
     : '';
   const bft = document.getElementById('badge-find-txt');
-  if (bft) bft.textContent = instanceTotal;
+  if (bft) bft.textContent = uniqueCount;
 }
 
 function renderFindings(findings) {
@@ -5278,10 +5314,217 @@ function _vectorKeywords(g) {
   return [...new Set(kw)].filter(Boolean);
 }
 
+const _FINDING_KNOWLEDGE_PROFILES = [
+  {
+    id: 'weak_csp',
+    match: ['weak_csp', 'csp_policy', 'content-security-policy', 'missing csp', 'csp header'],
+    title: 'Missing or weak Content Security Policy',
+    summary: 'Content-Security-Policy is the browser-side safety net that limits which scripts, styles, frames, and network destinations a page can use. When it is missing, the browser has no policy to stop injected script from executing or loading attacker-controlled resources.',
+    why: [
+      'This does not create XSS by itself, but it removes an important defense-in-depth control.',
+      'If any reflected, stored, DOM, file upload, or third-party script issue exists on these pages, the missing CSP makes exploitation easier and impact higher.',
+      'Because this appears on multiple URLs, it likely represents a site-wide response-header gap rather than a one-off page issue.',
+    ],
+    attack: [
+      'Attacker finds any HTML/script injection point on one affected page.',
+      'Victim opens the crafted URL or views stored content.',
+      'Without CSP, the browser can run inline script, load script from untrusted domains, frame the page, or exfiltrate data depending on page behavior.',
+    ],
+    fix: [
+      "Start with a Report-Only policy, then enforce it after tuning.",
+      "Use a baseline such as: default-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'self'; script-src 'self' 'nonce-<random-per-request>'; upgrade-insecure-requests.",
+      "Avoid unsafe-inline, unsafe-eval, broad wildcards, and arbitrary CDN domains unless they are required and reviewed.",
+      "Send the header on every HTML response, including errors and legacy routes.",
+    ],
+    verify: [
+      'Run curl -I on representative affected URLs and confirm Content-Security-Policy is present.',
+      'Use CSP Evaluator or browser DevTools Security/Console to catch unsafe directives.',
+      'Confirm inline script without a valid nonce is blocked and CSP violation reports are generated.',
+    ],
+    refs: ['WSTG-CLNT', 'CWE-693', 'CSP Evaluator'],
+  },
+  {
+    id: 'security_header',
+    match: ['security_header', 'missing security header', 'x-frame-options', 'x-content-type-options', 'referrer-policy', 'permissions-policy', 'hsts', 'strict-transport-security'],
+    title: 'Missing or misconfigured browser security header',
+    summary: 'Browser security headers tell the client how to enforce protections such as clickjacking defense, MIME sniffing prevention, transport security, and privacy-preserving referrers.',
+    why: ['A missing header usually increases exploitability of another bug rather than being the only vulnerability.', 'Attackers benefit because the browser has fewer restrictions when rendering untrusted content or following cross-origin flows.'],
+    attack: ['Combine the missing header with XSS, clickjacking, mixed content, or sensitive referrer exposure.', 'Use browser defaults that are weaker than the application security model expects.'],
+    fix: ['Add the relevant header at the edge or application layer and make it consistent across all HTML responses.', 'Prefer deny-by-default values, then allow only the behavior that is required.'],
+    verify: ['Check headers on normal pages, error pages, static HTML, and authenticated pages.', 'Validate with curl -I and browser DevTools.'],
+    refs: ['OWASP Secure Headers', 'CWE-693'],
+  },
+  {
+    id: 'xss_reflected',
+    match: ['xss_reflected', 'xss_stored', 'dom_xss', 'cross-site scripting', 'reflected xss', 'stored xss'],
+    title: 'Cross-site scripting',
+    summary: 'Untrusted input reaches a browser response or DOM sink as executable script. The code runs in the user context of the vulnerable origin.',
+    why: ['A successful XSS can read page data, call same-origin APIs, perform actions as the victim, and pivot into account takeover.', 'Impact is higher when session cookies are not HttpOnly, privileged users can trigger the page, or CSP is weak/missing.'],
+    attack: ['Attacker crafts a payload for the vulnerable parameter or stored content field.', 'Victim opens the link or views the stored content.', 'The browser executes attacker JavaScript under the trusted site origin.'],
+    fix: ['Contextually encode output for HTML, attributes, URLs, CSS, and JavaScript contexts.', 'Sanitize rich HTML with a proven allowlist sanitizer.', 'Avoid dangerous DOM sinks such as innerHTML unless input is sanitized.', 'Add CSP as defense-in-depth, not as the only fix.'],
+    verify: ['Replay the captured payload and confirm it is rendered as text, not executed.', 'Test alternate encodings and event-handler payloads for the same sink.'],
+    refs: ['WSTG-INPV', 'CWE-79', 'OWASP XSS Prevention Cheat Sheet'],
+  },
+  {
+    id: 'sqli_error',
+    match: ['sqli_error', 'sql injection', 'sqli', 'sql syntax', 'database error'],
+    title: 'SQL injection indicator',
+    summary: 'Input appears to influence a database query. Error-based findings are important because database errors often reveal that user input reached SQL syntax unsafely.',
+    why: ['SQL injection can expose, modify, or delete application data.', 'Even when only an error is shown, the error helps an attacker fingerprint the database and refine payloads.'],
+    attack: ['Attacker identifies the injectable parameter.', 'Payloads are adjusted to enumerate tables, bypass authentication, or extract sensitive records.'],
+    fix: ['Use parameterized queries or safe ORM bindings for every dynamic value.', 'Avoid string concatenation for SQL.', 'Return generic errors to users and keep detailed database errors server-side only.'],
+    verify: ['Replay payloads and confirm they are treated as data.', 'Add tests around the affected query path with quotes, comments, and boolean conditions.'],
+    refs: ['WSTG-INPV', 'CWE-89'],
+  },
+  {
+    id: 'open_redirect',
+    match: ['open_redirect', 'open redirect', 'redirect_url', 'unvalidated redirect'],
+    title: 'Open redirect',
+    summary: 'The application redirects users to a destination controlled by request input.',
+    why: ['Attackers can use the trusted domain to make phishing links look legitimate.', 'In OAuth or SSO flows, open redirects can sometimes leak authorization codes or tokens.'],
+    attack: ['Attacker sends a trusted-site URL with a malicious redirect parameter.', 'Victim follows it and lands on an attacker-controlled page that looks related to the original site.'],
+    fix: ['Use server-side allowlists of exact redirect destinations or route names.', 'Reject absolute external URLs unless they are explicitly trusted.', 'Normalize and validate URLs before redirecting.'],
+    verify: ['Replay with https://evil.example and protocol-relative URLs such as //evil.example.', 'Confirm the application blocks or rewrites untrusted destinations.'],
+    refs: ['WSTG-CLNT', 'CWE-601'],
+  },
+  {
+    id: 'cors',
+    match: ['cors', 'access-control-allow-origin', 'cross-origin resource sharing'],
+    title: 'Permissive CORS policy',
+    summary: 'The server allows cross-origin browser reads more broadly than intended.',
+    why: ['If credentials are allowed or sensitive APIs are readable cross-origin, a malicious site can make the victim browser read private data.', 'Origin reflection is especially risky when combined with cookies, bearer tokens, or intranet-only APIs.'],
+    attack: ['Victim visits attacker-controlled site while logged in.', 'Attacker JavaScript calls the vulnerable API from the victim browser.', 'Browser allows the response to be read because CORS trusts the attacker origin.'],
+    fix: ['Allow only exact trusted origins.', 'Do not combine wildcard origins with credentials.', 'Vary responses by Origin when returning dynamic CORS headers.'],
+    verify: ['Send requests with Origin: https://evil.example and confirm it is not allowed.', 'Check credentialed requests and preflight responses.'],
+    refs: ['WSTG-CLNT', 'CWE-942'],
+  },
+  {
+    id: 'ssrf',
+    match: ['ssrf', 'server-side request forgery', '169.254.', 'metadata'],
+    title: 'Server-side request forgery',
+    summary: 'User input can influence a server-side request target.',
+    why: ['SSRF can expose internal services, cloud metadata, admin panels, or private network resources that are not reachable from the internet.', 'Impact can escalate to credential theft in cloud environments.'],
+    attack: ['Attacker supplies an internal URL or metadata-service address.', 'The server fetches it from a trusted network position.', 'Response data or side effects reveal internal access.'],
+    fix: ['Use strict allowlists for outbound destinations.', 'Block private IP ranges, link-local addresses, localhost, and DNS rebinding paths.', 'Use network egress controls so the application cannot reach sensitive metadata or admin networks.'],
+    verify: ['Replay with internal, encoded, redirected, IPv6, and DNS-rebinding variants.', 'Confirm blocked targets fail before any outbound request is made.'],
+    refs: ['WSTG-INPV', 'CWE-918'],
+  },
+  {
+    id: 'path_traversal',
+    match: ['path_traversal', 'lfi', 'local file inclusion', 'directory traversal', '../', 'etc/passwd'],
+    title: 'Path traversal or local file inclusion',
+    summary: 'Input appears to control a filesystem path without enough normalization and allowlisting.',
+    why: ['Attackers may read application secrets, source code, configuration files, or operating-system files.', 'Read access can become remote code execution when logs, uploads, templates, or include paths are reachable.'],
+    attack: ['Attacker injects traversal sequences or encoded path separators.', 'Application resolves the path outside the intended directory.', 'Sensitive local files are returned or included.'],
+    fix: ['Map user choices to server-side file IDs instead of accepting raw paths.', 'Canonicalize paths and enforce that the resolved path stays inside the expected base directory.', 'Deny absolute paths, traversal segments, null bytes, and encoded separator variants.'],
+    verify: ['Replay traversal payloads with URL encoding, double encoding, and mixed path separators.', 'Confirm the server returns a safe error and never reads outside the allowed directory.'],
+    refs: ['WSTG-ATHZ', 'CWE-22'],
+  },
+  {
+    id: 'cookie',
+    match: ['cookie', 'httponly', 'samesite', 'secure flag', 'session cookie'],
+    title: 'Weak cookie attributes',
+    summary: 'Session or sensitive cookies are missing browser-enforced protections.',
+    why: ['Without HttpOnly, XSS can read the cookie value.', 'Without Secure, cookies may be sent over cleartext HTTP.', 'Without SameSite, cross-site requests can carry the cookie more easily.'],
+    attack: ['Attacker combines weak cookie flags with XSS, network interception, or CSRF.', 'The browser sends or exposes session material in a context the application did not intend.'],
+    fix: ['Set HttpOnly, Secure, and an appropriate SameSite value on session cookies.', 'Use __Host- or __Secure- cookie prefixes where applicable.', 'Rotate sessions after login and privilege changes.'],
+    verify: ['Inspect Set-Cookie headers on login, refresh, logout, and error paths.', 'Confirm flags are present for every session-setting response.'],
+    refs: ['WSTG-SESS', 'CWE-614'],
+  },
+  {
+    id: 'csrf',
+    match: ['csrf', 'cross-site request forgery', 'missing csrf', 'anti-csrf'],
+    title: 'Cross-site request forgery weakness',
+    summary: 'A state-changing action may be accepted without a strong per-request anti-CSRF control.',
+    why: ['A malicious site can cause a logged-in victim browser to submit unwanted actions.', 'Impact depends on the action: profile changes, email change, password reset, purchase, or admin operations are high-risk.'],
+    attack: ['Victim is authenticated to the target application.', 'Victim visits attacker-controlled content.', 'The attacker page submits a forged request using the victim browser cookies.'],
+    fix: ['Require unpredictable anti-CSRF tokens bound to the user session.', 'Use SameSite cookies as defense-in-depth, not as the only control.', 'Require re-authentication for critical actions.'],
+    verify: ['Replay the state-changing request without a token and with a token from another session.', 'Confirm both are rejected server-side.'],
+    refs: ['WSTG-SESS', 'CWE-352'],
+  },
+  {
+    id: 'host_header_injection',
+    match: ['host_header_injection', 'host header', 'x-forwarded-host', 'x-host'],
+    title: 'Host header injection',
+    summary: 'The application appears to trust client-supplied host or forwarding headers when building links or routing decisions.',
+    why: ['Poisoned host values can affect password-reset links, redirects, caches, generated emails, and tenant routing.', 'In some deployments this can lead to cache poisoning, phishing, or SSRF-like behavior.'],
+    attack: ['Attacker sends a request with a malicious Host or X-Forwarded-Host header.', 'Application uses that value in a link, redirect, cache key, or backend request.'],
+    fix: ['Validate Host against a strict allowlist at the edge and in the application.', 'Ignore forwarding headers unless they come from trusted proxies.', 'Use configured canonical base URLs for generated links.'],
+    verify: ['Replay with Host and X-Forwarded-Host set to an attacker domain.', 'Confirm responses, emails, redirects, and cache keys do not include the attacker host.'],
+    refs: ['WSTG-CONF', 'CWE-20'],
+  },
+  {
+    id: 'idor',
+    match: ['idor', 'broken access control', 'insecure direct object reference', 'authorization bypass', 'auth bypass'],
+    title: 'Broken object-level authorization',
+    summary: 'The application may allow access to an object or action based only on a predictable identifier.',
+    why: ['Attackers can read or modify another user account, order, file, tenant, or workflow object.', 'This is often high impact because it bypasses the business authorization model rather than only leaking metadata.'],
+    attack: ['Attacker authenticates as a normal user.', 'They change an ID, slug, tenant key, or workflow step in the request.', 'The server returns or modifies an object they should not access.'],
+    fix: ['Enforce object ownership and permission checks on the server for every request.', 'Avoid trusting client-side hidden fields or route IDs as authorization proof.', 'Add authorization tests for cross-user and cross-tenant access.'],
+    verify: ['Replay the request with two users from different tenants or roles.', 'Confirm unauthorized object IDs return 403 or equivalent safe denial.'],
+    refs: ['WSTG-ATHZ', 'CWE-639'],
+  },
+];
+
+function _findingKnowledgeProfile(g) {
+  const hay = [g.type, g.category, g.finding, g.agent, g.phase, g.cwe, g.owasp]
+    .filter(Boolean).join(' ').toLowerCase();
+  return _FINDING_KNOWLEDGE_PROFILES.find(p =>
+    p.match.some(token => hay.includes(String(token).toLowerCase()))
+  );
+}
+
+function _pushWhySection(lines, title, body) {
+  const items = Array.isArray(body) ? body.filter(Boolean) : [body].filter(Boolean);
+  if (!items.length) return;
+  if (lines.length) lines.push('');
+  lines.push(title);
+  items.forEach(item => lines.push(`- ${item}`));
+}
+
+function _buildKnowledgeWhyReason(g, profile) {
+  const lines = [profile.title, profile.summary];
+  _pushWhySection(lines, 'Why it matters', profile.why);
+  _pushWhySection(lines, 'Attack path', profile.attack);
+  _pushWhySection(lines, 'How to fix', profile.fix);
+  _pushWhySection(lines, 'How to verify', profile.verify);
+  _pushWhySection(lines, 'Useful references', profile.refs);
+
+  const primaryUrl = (g.affected_urls && g.affected_urls[0])
+                  || g.url
+                  || (g.instances && g.instances[0] && g.instances[0].url)
+                  || '';
+  const affectedCount = (g.affected_urls || []).length;
+  const context = [];
+  if (primaryUrl) context.push(`URL:        ${primaryUrl}`);
+  if (affectedCount > 1) context.push(`            (+${affectedCount - 1} more URL${affectedCount > 2 ? 's' : ''})`);
+  if (g.param) context.push(`Parameter:  ${g.param}`);
+  if (g.payload) context.push(`Payload:    ${g.payload}`);
+  if (g.status_code) context.push(`Status:     HTTP ${g.status_code}`);
+  if (g.phase) context.push(`Detected:   ${g.phase} - ${g.agent || ''}`);
+  if (g.count > 1) {
+    const urlsLabel = affectedCount || g.count;
+    context.push(`Instances:  ${g.count} occurrences across ${urlsLabel} URL${urlsLabel !== 1 ? 's' : ''}`);
+  }
+  if (g.proof) context.push(`Proof:      ${g.proof}`);
+  if (g.owasp) context.push(`OWASP:      ${g.owasp}`);
+  if (g.cwe) context.push(`CWE:        ${g.cwe}`);
+
+  if (context.length) {
+    lines.push('');
+    lines.push('Finding context');
+    lines.push(...context);
+  }
+
+  return lines.join('\n').trim();
+}
+
 // Human-readable explanation of WHY a finding is an issue (passive findings have no proof)
 function _buildWhyReason(g) {
   const t       = (g.type    || '').toLowerCase();
   const finding = (g.finding || '');
+  const profile = _findingKnowledgeProfile(g);
+  if (profile) return _buildKnowledgeWhyReason(g, profile);
   const lines   = [];
 
   // ── Specific explanation by type ─────────────────────────────────────────
@@ -6304,12 +6547,12 @@ async function viewHistoryScanFindings(scanId, scanName) {
   updateSeverityStats(findings, histInstanceTotal);
   const fc = document.getElementById('findings-count-tab');
   if (fc) fc.textContent = histUnique > 0
-    ? (histInstanceTotal > histUnique ? ` (${histUnique} unique · ${histInstanceTotal} total)` : ` (${histUnique})`)
+    ? ` (${_formatFindingBadgeTotals({ unique: histUnique })})`
     : '';
   const bft = document.getElementById('badge-find-txt');
-  if (bft) bft.textContent = histInstanceTotal;
+  if (bft) bft.textContent = histUnique;
   const bf = document.getElementById('badge-findings');
-  if (bf) bf.style.display = histInstanceTotal > 0 ? '' : 'none';
+  if (bf) bf.style.display = histUnique > 0 ? '' : 'none';
 
   const ctx = document.getElementById('findings-scan-ctx');
   if (ctx) {
@@ -6904,6 +7147,95 @@ async function loadCapabilitiesStatus() {
     <div class="cap-row"><span class="cap-name">Site map URLs</span><span class="cap-count">${r.site_map?.urls||0}</span></div>`;
 }
 
+let _requirementsPollTimer = null;
+
+function _requirementStatusIcon(item) {
+  if (item.available) return '<span class="cap-tick-yes">✓</span>';
+  if (item.installable) return '<span class="cap-tick-no" style="color:var(--yellow)">install</span>';
+  return '<span class="cap-tick-no">manual</span>';
+}
+
+function _renderRequirementRows(items) {
+  const missing = items.filter(item => !item.available);
+  const shown = missing.length ? missing : items.filter(item => !item.required).slice(0, 10);
+  if (!shown.length) {
+    return '<div class="cap-row"><span class="cap-name">All requirements are installed</span><span class="cap-tick-yes">✓</span></div>';
+  }
+  return shown.map(item => `
+    <div class="cap-row" title="${escHtml(item.install_command || item.note || '')}">
+      <span class="cap-name">
+        <b style="color:${item.available ? 'var(--fg)' : 'var(--yellow)'}">${escHtml(item.name)}</b>
+        <span style="color:var(--muted);font-size:10px;margin-left:6px;">${escHtml(item.category || '')}</span>
+        <span style="display:block;color:var(--muted);font-size:10px;margin-top:2px;">${escHtml(item.note || item.install_command || '')}</span>
+      </span>
+      ${_requirementStatusIcon(item)}
+    </div>`).join('');
+}
+
+function _renderRequirementsLog(install) {
+  const logEl = document.getElementById('requirements-install-log');
+  if (!logEl) return;
+  const lines = install?.log || [];
+  const commands = install?.commands || [];
+  if (!lines.length && !commands.length) {
+    logEl.style.display = 'none';
+    logEl.textContent = '';
+    return;
+  }
+  logEl.style.display = '';
+  logEl.textContent = [
+    install?.running ? '[running] Installing missing requirements…' : '',
+    install?.success === true ? '[done] Install finished successfully' : '',
+    install?.success === false ? '[done] Install finished with errors — review output below' : '',
+    ...lines,
+  ].filter(Boolean).join('\n');
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+async function loadRequirementsStatus() {
+  const r = await api('/api/requirements/status');
+  if (!r || r.error) return;
+  const el = document.getElementById('requirements-status');
+  const btn = document.getElementById('btn-install-requirements');
+  if (!el) return;
+
+  const missing = r.missing_count || 0;
+  const installable = r.installable_missing_count || 0;
+  const install = r.install || {};
+  const titleColor = missing ? 'var(--yellow)' : 'var(--green)';
+  el.innerHTML = `
+    <div class="cap-row" style="grid-column:1/-1;">
+      <span class="cap-name"><b style="color:${titleColor}">${missing} missing</b> · ${installable} installable by button</span>
+      <span class="cap-count">${r.items?.length || 0} checked</span>
+    </div>
+    ${_renderRequirementRows(r.items || [])}`;
+
+  if (btn) {
+    btn.disabled = install.running || installable === 0;
+    btn.textContent = install.running ? 'Installing…' : (installable > 0 ? `Install ${installable} missing` : 'Nothing to install');
+  }
+  _renderRequirementsLog(install);
+
+  if (_requirementsPollTimer) clearTimeout(_requirementsPollTimer);
+  if (install.running) {
+    _requirementsPollTimer = setTimeout(loadRequirementsStatus, 2500);
+  }
+}
+
+async function installMissingRequirements() {
+  const btn = document.getElementById('btn-install-requirements');
+  if (btn) { btn.disabled = true; btn.textContent = 'Starting…'; }
+  const r = await api('/api/requirements/install', 'POST', {});
+  if (!r || r.error) {
+    toast(r?.error || 'Failed to start requirements install', 'err');
+    await loadRequirementsStatus();
+    return;
+  }
+  if (r.status === 'nothing_to_install') toast('All installable requirements are already present', 'ok');
+  else toast(`Installing ${r.command_count || 0} requirement command${(r.command_count||0) === 1 ? '' : 's'}…`, 'ok');
+  await loadRequirementsStatus();
+}
+
 // ═══════════════════════════════════════════════════════════════
 // TOOLS TAB LOADER
 // ═══════════════════════════════════════════════════════════════
@@ -6912,6 +7244,7 @@ async function loadToolsTab() {
     refreshProxyStatus(),
     loadAgentTuning(),
     loadCapabilitiesStatus(),
+    loadRequirementsStatus(),
     loadOpenApiStatus(),
     loadOASTStatus(),
   ]);

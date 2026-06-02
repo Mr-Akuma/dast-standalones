@@ -43,6 +43,40 @@ def test_findings_count_matches_list_length(app_client):
     assert data["count"] == len(data["findings"])
 
 
+def test_scan_status_exposes_unique_and_raw_finding_counts(app_client):
+    client, app_module = app_client
+
+    original_findings = list(app_module._findings)
+    try:
+        app_module._findings.clear()
+        app_module._findings.extend([
+            {
+                "agent": "Engine Fuzzer",
+                "severity": "high",
+                "type": "xss_reflected",
+                "finding": "Reflected XSS in search param",
+                "url": "https://example.com/search?q=one",
+            },
+            {
+                "agent": "Engine Fuzzer",
+                "severity": "high",
+                "type": "xss_reflected",
+                "finding": "Reflected XSS in search param",
+                "url": "https://example.com/search?q=two",
+            },
+        ])
+
+        resp = client.get("/api/scan/status")
+        data = resp.get_json()
+
+        assert data["findings"] == 2
+        assert data["raw_findings"] == 2
+        assert data["unique_findings"] == 1
+    finally:
+        app_module._findings.clear()
+        app_module._findings.extend(original_findings)
+
+
 def test_discovery_path_records_do_not_inflate_main_findings_count(app_client):
     client, app_module = app_client
 
