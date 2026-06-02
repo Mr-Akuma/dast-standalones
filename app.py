@@ -12,6 +12,7 @@ Inspired by OWASP ZAP. Runs 24 specialist AI agents across 4 phases:
 from __future__ import annotations
 
 import json
+import importlib.util
 import logging
 import hmac
 import os
@@ -20,6 +21,7 @@ import secrets
 import shlex
 import ssl
 import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -5325,7 +5327,9 @@ def scan_stop():
 def scan_status():
     with _lock:
         agents_list = list(_agents.values())
-        findings = len(_main_security_findings(_findings))
+        security_findings = _main_security_findings(_findings)
+        findings = len(security_findings)
+        unique_findings = _group_findings(security_findings)["count"] if security_findings else 0
     total    = len(agents_list)
     running  = sum(1 for a in agents_list if a["status"] == "running")
     pending  = sum(1 for a in agents_list if a["status"] == "pending")
@@ -5361,6 +5365,8 @@ def scan_status():
         "pending":        pending,
         "done":           done,
         "findings":       findings,
+        "raw_findings":   findings,
+        "unique_findings": unique_findings,
         "agents":         agents_out,
         "engine": {
             "running":    eng_running,
@@ -13992,6 +13998,315 @@ def assurance_fp_lab():
         ))
     except KeyError as exc:
         return jsonify({"error": str(exc)}), 404
+
+
+_REQUIREMENTS_FILE = Path(__file__).resolve().with_name("requirements.txt")
+_PYTHON_REQUIREMENT_MODULES = {
+    "psycopg2-binary": "psycopg2",
+    "pyyaml": "yaml",
+    "httpx": "httpx",
+    "grpcio": "grpc",
+    "grpcio-reflection": "grpc_reflection",
+    "protobuf": "google.protobuf",
+    "flask": "flask",
+    "gunicorn": "gunicorn",
+    "requests": "requests",
+    "urllib3": "urllib3",
+    "redis": "redis",
+    "certifi": "certifi",
+    "cryptography": "cryptography",
+    "playwright": "playwright",
+}
+_EXTERNAL_REQUIREMENTS = [
+    {"id": "tool-sqlmap", "name": "sqlmap", "binary": "sqlmap", "category": "External scanner", "required": False,
+     "note": "Deep SQL injection validation"},
+    {"id": "tool-nuclei", "name": "nuclei", "binary": "nuclei", "category": "External scanner", "required": False,
+     "note": "Community vulnerability templates"},
+    {"id": "tool-nmap", "name": "nmap", "binary": "nmap", "category": "External scanner", "required": False,
+     "note": "Port/service enumeration"},
+    {"id": "tool-gobuster", "name": "gobuster", "binary": "gobuster", "category": "External scanner", "required": False,
+     "note": "Directory and file brute forcing"},
+    {"id": "tool-katana", "name": "katana", "binary": "katana", "category": "Crawler", "required": False,
+     "note": "JS-aware crawling and endpoint extraction"},
+    {"id": "tool-httpx", "name": "httpx", "binary": "httpx", "category": "Crawler", "required": False,
+     "note": "Fast liveness probing"},
+    {"id": "tool-fabric", "name": "fabric", "binary": "fabric", "category": "AI helper", "required": False,
+     "note": "Optional finding/report analysis patterns"},
+    {"id": "tool-node", "name": "node", "binary": "node", "category": "Runtime", "required": False,
+     "note": "JavaScript hooks and tooling"},
+    {"id": "tool-groovy", "name": "groovy", "binary": "groovy", "category": "Runtime", "required": False,
+     "note": "Groovy hooks"},
+    {"id": "tool-redis-server", "name": "redis-server", "binary": "redis-server", "category": "Performance", "required": False,
+     "note": "Optional Redis cache/server; REDIS_URL still needs configuration"},
+    {"id": "python-mitmproxy", "name": "mitmproxy", "module": "mitmproxy", "category": "Python package", "required": False,
+     "note": "Optional proxy engine package"},
+]
+_requirements_install_lock = threading.Lock()
+_requirements_install_state = {
+    "running": False,
+    "started_at": None,
+    "finished_at": None,
+    "success": None,
+    "commands": [],
+    "item_ids": [],
+    "log": [],
+}
+
+
+def _module_available(module: str) -> bool:
+    try:
+        return importlib.util.find_spec(module) is not None
+    except (ImportError, AttributeError, ValueError):
+        return False
+
+
+def _binary_available(binary: str) -> bool:
+    if binary == "node":
+        return bool(_shutil_top.which("node") or _shutil_top.which("nodejs"))
+    return bool(_shutil_top.which(binary))
+
+
+def _parse_python_requirements() -> list[dict]:
+    items: list[dict] = []
+    if not _REQUIREMENTS_FILE.exists():
+        return items
+    for raw in _REQUIREMENTS_FILE.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or line.startswith(("-", "git+", "http://", "https://")):
+            continue
+        package = re.split(r"[<>=!~;]", line, maxsplit=1)[0].strip()
+        base = re.sub(r"\[.*\]", "", package).strip().lower()
+        if not base:
+            continue
+        module = _PYTHON_REQUIREMENT_MODULES.get(base, base.replace("-", "_"))
+        items.append({
+            "id": f"python-{base.replace('_', '-')}",
+            "name": package,
+            "module": module,
+            "category": "Python package",
+            "required": True,
+            "note": "Installed from requirements.txt",
+        })
+    return items
+
+
+def _format_install_command(cmd: list[str]) -> str:
+    return " ".join(shlex.quote(str(part)) for part in cmd)
+
+
+def _package_manager_command(package: str, winget_id: str | None = None) -> list[str] | None:
+    if _shutil_top.which("choco"):
+        return ["choco", "install", package, "-y"]
+    if _shutil_top.which("winget") and winget_id:
+        return ["winget", "install", "-e", "--id", winget_id,
+                "--accept-source-agreements", "--accept-package-agreements"]
+    if _shutil_top.which("brew"):
+        return ["brew", "install", package]
+    if _shutil_top.which("apt-get"):
+        sudo = _shutil_top.which("sudo")
+        return ([sudo] if sudo else []) + ["apt-get", "install", "-y", package]
+    return None
+
+
+def _install_commands_for_requirement(item: dict) -> list[list[str]]:
+    item_id = item.get("id", "")
+    if item_id.startswith("python-"):
+        if item_id == "python-mitmproxy":
+            return [[sys.executable, "-m", "pip", "install", "mitmproxy"]]
+        commands = [[sys.executable, "-m", "pip", "install", "-r", str(_REQUIREMENTS_FILE)]]
+        if item_id == "python-playwright":
+            commands.append([sys.executable, "-m", "playwright", "install", "chromium"])
+        return commands
+
+    go_bin = _shutil_top.which("go")
+    go_packages = {
+        "tool-nuclei": "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest",
+        "tool-katana": "github.com/projectdiscovery/katana/cmd/katana@latest",
+        "tool-httpx": "github.com/projectdiscovery/httpx/cmd/httpx@latest",
+        "tool-gobuster": "github.com/OJ/gobuster/v3@latest",
+        "tool-fabric": "github.com/danielmiessler/fabric@latest",
+    }
+    if item_id in go_packages and go_bin:
+        return [[go_bin, "install", go_packages[item_id]]]
+
+    if item_id == "tool-sqlmap":
+        return [[sys.executable, "-m", "pip", "install", "sqlmap"]]
+    if item_id == "tool-nmap":
+        cmd = _package_manager_command("nmap", "Insecure.Nmap")
+        return [cmd] if cmd else []
+    if item_id == "tool-node":
+        cmd = _package_manager_command("nodejs", "OpenJS.NodeJS.LTS")
+        return [cmd] if cmd else []
+    if item_id == "tool-groovy":
+        cmd = _package_manager_command("groovy", "Apache.Groovy.4")
+        return [cmd] if cmd else []
+    if item_id == "tool-redis-server":
+        cmd = _package_manager_command("redis-server", "Redis.Redis")
+        return [cmd] if cmd else []
+    return []
+
+
+def _requirements_status_items() -> list[dict]:
+    specs = _parse_python_requirements() + list(_EXTERNAL_REQUIREMENTS)
+    items: list[dict] = []
+    for spec in specs:
+        spec = dict(spec)
+        if "module" in spec:
+            available = _module_available(spec["module"])
+        else:
+            available = _binary_available(spec.get("binary", spec["name"]))
+        commands = [] if available else _install_commands_for_requirement(spec)
+        spec.update({
+            "available": available,
+            "installable": bool(commands),
+            "install_commands": commands,
+            "install_command": " && ".join(_format_install_command(cmd) for cmd in commands),
+        })
+        if not commands and not available:
+            spec["install_command"] = _manual_install_hint(spec)
+        items.append(spec)
+    return items
+
+
+def _manual_install_hint(item: dict) -> str:
+    item_id = item.get("id", "")
+    if item_id in {"tool-nuclei", "tool-katana", "tool-httpx", "tool-gobuster", "tool-fabric"}:
+        return "Install Go, then use the recommended go install command for this tool."
+    if item_id == "tool-nmap":
+        return "Install nmap with your OS package manager, then restart or refresh PATH."
+    if item_id == "tool-redis-server":
+        return "Install Redis server and set REDIS_URL if you want Redis-backed cache/context."
+    return "Install manually, then refresh this list."
+
+
+def _requirements_install_plan(items: list[dict]) -> tuple[list[list[str]], list[dict]]:
+    missing = [item for item in items if not item.get("available") and item.get("installable")]
+    commands: list[list[str]] = []
+    seen: set[tuple[str, ...]] = set()
+    for item in missing:
+        for cmd in item.get("install_commands", []):
+            key = tuple(str(part) for part in cmd)
+            if key in seen:
+                continue
+            seen.add(key)
+            commands.append(list(key))
+    return commands, missing
+
+
+def _install_state_snapshot() -> dict:
+    with _requirements_install_lock:
+        return json.loads(json.dumps(_requirements_install_state))
+
+
+def _append_install_log(line: str) -> None:
+    with _requirements_install_lock:
+        log_lines = _requirements_install_state.setdefault("log", [])
+        log_lines.append(line)
+        if len(log_lines) > 200:
+            del log_lines[:-200]
+
+
+def _run_requirements_install(commands: list[list[str]], item_ids: list[str]) -> None:
+    with _requirements_install_lock:
+        _requirements_install_state.update({
+            "running": True,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "finished_at": None,
+            "success": None,
+            "commands": [_format_install_command(cmd) for cmd in commands],
+            "item_ids": item_ids,
+            "log": [],
+        })
+
+    success = True
+    for cmd in commands:
+        _append_install_log("$ " + _format_install_command(cmd))
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=str(Path(__file__).resolve().parent),
+                text=True,
+                capture_output=True,
+                timeout=1800,
+            )
+            output = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+            if output:
+                tail = "\n".join(output.splitlines()[-40:])
+                _append_install_log(tail)
+            _append_install_log(f"[exit {proc.returncode}]")
+            if proc.returncode != 0:
+                success = False
+        except Exception as exc:
+            success = False
+            _append_install_log(f"[error] {exc}")
+
+    with _requirements_install_lock:
+        _requirements_install_state.update({
+            "running": False,
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "success": success,
+        })
+
+
+@app.route("/api/requirements/status")
+@_login_required
+def requirements_status():
+    items = _requirements_status_items()
+    missing = [item for item in items if not item.get("available")]
+    installable_missing = [item for item in missing if item.get("installable")]
+    return jsonify({
+        "items": items,
+        "missing": missing,
+        "missing_count": len(missing),
+        "installable_missing_count": len(installable_missing),
+        "python_executable": sys.executable,
+        "project_root": str(Path(__file__).resolve().parent),
+        "install": _install_state_snapshot(),
+    })
+
+
+@app.route("/api/requirements/install", methods=["POST"])
+@_login_required
+def requirements_install():
+    data = req.get_json(silent=True) or {}
+    dry_run = bool(data.get("dry_run"))
+    items = _requirements_status_items()
+    commands, targets = _requirements_install_plan(items)
+    formatted = [_format_install_command(cmd) for cmd in commands]
+
+    if dry_run:
+        return jsonify({
+            "status": "dry_run",
+            "commands": formatted,
+            "command_count": len(commands),
+            "items": [item["id"] for item in targets],
+        })
+
+    if _install_state_snapshot().get("running"):
+        return jsonify({"error": "requirements install already running",
+                        "install": _install_state_snapshot()}), 409
+
+    if not commands:
+        return jsonify({
+            "status": "nothing_to_install",
+            "commands": [],
+            "command_count": 0,
+            "install": _install_state_snapshot(),
+        })
+
+    threading.Thread(
+        target=_run_requirements_install,
+        args=(commands, [item["id"] for item in targets]),
+        daemon=True,
+        name="requirements-install",
+    ).start()
+    return jsonify({
+        "status": "started",
+        "commands": formatted,
+        "command_count": len(commands),
+        "items": [item["id"] for item in targets],
+        "install": _install_state_snapshot(),
+    })
 
 
 @app.route("/api/capabilities")
