@@ -9,6 +9,17 @@
 #   Pool sizing (optional env vars):
 #     DB_POOL_MIN=2   (minimum idle connections, default 2)
 #     DB_POOL_MAX=20  (maximum connections, default 20)
+#
+# Dashboard security env vars for EC2/internal deployment:
+#   REVELIO_SECRET=long random Flask signing secret
+#   DAST_ADMIN_USER=secops
+#   DAST_ADMIN_PASSWORD_HASH=<werkzeug generate_password_hash output>
+#   DAST_ALLOW_DEFAULT_LOGIN=0
+#   DAST_CSRF_PROTECT=1
+#   DAST_COOKIE_SAMESITE=Strict
+#   DAST_COOKIE_SECURE=1  # when served through HTTPS
+#   DAST_LOGIN_MAX_ATTEMPTS=5
+#   DAST_LOGIN_WINDOW_SECONDS=900
 
 scan:
   # Scan policy: quick | standard | full | api | stealth

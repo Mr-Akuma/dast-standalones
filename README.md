@@ -21,6 +21,8 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 $env:REVELIO_SECRET = "replace-with-a-long-random-secret"
+$env:DAST_ADMIN_USER = "admin"
+$env:DAST_ADMIN_PASSWORD = "replace-with-a-local-dev-password"
 python main.py --port 5002
 ```
 
@@ -39,6 +41,25 @@ python cli.py scan --url http://127.0.0.1:5002 --profile balanced
 ## Configuration
 
 Start from `config-template.yml`, then tune scan depth, authentication, OAST, safety limits, and pattern packs for your environment. Keep real credentials and target-specific secrets out of source control.
+
+## Internal EC2 Deployment
+
+For an internal EC2 deployment, keep the dashboard private and set real secrets before startup:
+
+```bash
+cp .env.example .env
+python -c "from werkzeug.security import generate_password_hash; import getpass; print(generate_password_hash(getpass.getpass('Dashboard password: ')))"
+docker compose up -d --build
+```
+
+Minimum EC2 controls:
+
+- Security group allows the dashboard only from VPN, bastion, or internal CIDR.
+- Use ALB/Nginx with TLS for browser access; set `DAST_COOKIE_SECURE=1` when using HTTPS.
+- Keep `DAST_ALLOW_DEFAULT_LOGIN=0`; use `DAST_ADMIN_PASSWORD_HASH`.
+- Use RDS/PostgreSQL or hardened Postgres with backups; never use the old default DB password.
+- Require IMDSv2 on the EC2 instance and block scanner egress to `169.254.169.254` unless you are intentionally testing metadata exposure in a controlled lab.
+- Store `.env` outside git, rotate credentials, and restrict shell access to the EC2 host.
 
 ## Tests
 

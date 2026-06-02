@@ -38,6 +38,12 @@ LABEL org.opencontainers.image.title="DAST Standalone"
 LABEL org.opencontainers.image.description="Production DAST security scanner with nmap, sqlmap, nuclei, and Playwright"
 LABEL org.opencontainers.image.source="https://github.com/dast-standalone"
 
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    DAST_ALLOW_DEFAULT_LOGIN=0 \
+    DAST_CSRF_PROTECT=1 \
+    DAST_COOKIE_SAMESITE=Strict
+
 # System dependencies: nmap + chromium deps for Playwright
 RUN apt-get update && apt-get install -y --no-install-recommends \
     nmap \
