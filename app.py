@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import importlib.util
 import logging
+import hmac
 import os
 import re
 import secrets
@@ -22,6 +23,7 @@ import ssl
 import subprocess
 import sys
 import threading
+import time
 import traceback
 import urllib.error
 import urllib.request
@@ -62,13 +64,14 @@ from collections import defaultdict
 from pathlib import Path
 from urllib.parse import urlparse, urljoin
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from flask import Flask, Response, jsonify, render_template, redirect, url_for, session
 from flask import request as req
 request = req  # alias — some handlers use `request` directly
 from functools import wraps
+from werkzeug.security import check_password_hash
 
 # ── DAST Engine modules ───────────────────────────────────────────────────────
 from modules.scope        import ScopeManager
@@ -312,7 +315,18 @@ if not _flask_secret:
     _flask_secret = secrets.token_hex(32)
     log.warning("REVELIO_SECRET is not set; using an ephemeral development Flask secret")
 app.secret_key = _flask_secret
-app.config['TEMPLATES_AUTO_RELOAD'] = True
+app.config.update(
+    TEMPLATES_AUTO_RELOAD=True,
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE=os.environ.get("DAST_COOKIE_SAMESITE", "Strict"),
+    SESSION_COOKIE_SECURE=os.environ.get("DAST_COOKIE_SECURE", "0").strip().lower()
+    in {"1", "true", "yes", "on"},
+    PERMANENT_SESSION_LIFETIME=timedelta(
+        hours=float(os.environ.get("DAST_SESSION_HOURS", "8"))
+    ),
+    DAST_CSRF_PROTECT=os.environ.get("DAST_CSRF_PROTECT", "1").strip().lower()
+    not in {"0", "false", "no", "off"},
+)
 
 _req_log = logging.getLogger("dast.http")
 
@@ -337,15 +351,137 @@ def _security_headers(response):
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault("X-XSS-Protection", "0")
+    response.headers.setdefault(
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=(), payment=()",
+    )
     return response
 
 # ── Auth credentials ───────────────────────────────────────────────────────────
-_AUTH_USERS = {
-    "admin": "admin",          # default — change in production
-}
+_DEFAULT_ADMIN_USER = "admin"
+_DEFAULT_ADMIN_PASSWORD = "admin"
+_login_attempts: dict[str, list[float]] = {}
 
 _INTERNAL_TOKEN = os.urandom(24).hex()   # scheduler → server auth bypass
 _SERVER_PORT    = 5002                   # overwritten by main.py via app.config
+
+
+def _truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _login_window_seconds() -> int:
+    try:
+        return max(1, int(os.environ.get("DAST_LOGIN_WINDOW_SECONDS", "900")))
+    except ValueError:
+        return 900
+
+
+def _login_max_attempts() -> int:
+    try:
+        return max(0, int(os.environ.get("DAST_LOGIN_MAX_ATTEMPTS", "5")))
+    except ValueError:
+        return 5
+
+
+def _client_ip() -> str:
+    forwarded = (req.headers.get("X-Forwarded-For") or "").split(",", 1)[0].strip()
+    return forwarded or req.remote_addr or "unknown"
+
+
+def _login_attempt_key(username: str) -> str:
+    return f"{_client_ip()}:{username.strip().lower()}"
+
+
+def _is_login_limited(username: str) -> bool:
+    limit = _login_max_attempts()
+    if limit <= 0:
+        return False
+    key = _login_attempt_key(username)
+    now = time.monotonic()
+    window = _login_window_seconds()
+    attempts = [ts for ts in _login_attempts.get(key, []) if now - ts < window]
+    _login_attempts[key] = attempts
+    return len(attempts) >= limit
+
+
+def _record_failed_login(username: str) -> None:
+    key = _login_attempt_key(username)
+    now = time.monotonic()
+    window = _login_window_seconds()
+    attempts = [ts for ts in _login_attempts.get(key, []) if now - ts < window]
+    attempts.append(now)
+    _login_attempts[key] = attempts
+
+
+def _clear_failed_logins(username: str) -> None:
+    _login_attempts.pop(_login_attempt_key(username), None)
+
+
+def _verify_dashboard_credentials(username: str, password: str) -> bool:
+    expected_user = (
+        os.environ.get("DAST_ADMIN_USER") or _DEFAULT_ADMIN_USER
+    ).strip() or _DEFAULT_ADMIN_USER
+    if not hmac.compare_digest(username, expected_user):
+        return False
+
+    password_hash = (os.environ.get("DAST_ADMIN_PASSWORD_HASH") or "").strip()
+    if password_hash:
+        try:
+            return check_password_hash(password_hash, password)
+        except ValueError:
+            log.warning("Invalid DAST_ADMIN_PASSWORD_HASH; dashboard login disabled")
+            return False
+
+    plain_password = os.environ.get("DAST_ADMIN_PASSWORD")
+    if plain_password is not None:
+        return hmac.compare_digest(password, plain_password)
+
+    if _truthy(os.environ.get("DAST_ALLOW_DEFAULT_LOGIN")):
+        return (
+            username == _DEFAULT_ADMIN_USER
+            and hmac.compare_digest(password, _DEFAULT_ADMIN_PASSWORD)
+        )
+    return False
+
+
+def _ensure_csrf_token() -> str:
+    token = session.get("_csrf_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session["_csrf_token"] = token
+    return token
+
+
+def _csrf_enabled() -> bool:
+    if app.config.get("TESTING") and not app.config.get("DAST_TEST_CSRF_ENABLED"):
+        return False
+    return bool(app.config.get("DAST_CSRF_PROTECT", True))
+
+
+@app.before_request
+def _csrf_protect_state_changes():
+    if req.headers.get("X-Internal-Token") == _INTERNAL_TOKEN:
+        return None
+    if req.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return None
+    if req.endpoint in {"login_page"}:
+        return None
+    if not _csrf_enabled() or not session.get("authenticated"):
+        return None
+
+    expected = session.get("_csrf_token")
+    supplied = (
+        req.headers.get("X-CSRF-Token")
+        or req.headers.get("X-CSRFToken")
+        or req.form.get("_csrf_token")
+    )
+    if expected and supplied and hmac.compare_digest(str(expected), str(supplied)):
+        return None
+    if req.path.startswith("/api/"):
+        return jsonify({"ok": False, "error": "csrf_failed"}), 403
+    return "CSRF validation failed", 403
+
 
 def _login_required(f):
     @wraps(f)
@@ -4534,12 +4670,18 @@ def login_page():
     if req.method == "POST":
         username = (req.form.get("username") or "").strip()
         password = (req.form.get("password") or "").strip()
-        if username in _AUTH_USERS and _AUTH_USERS[username] == password:
+        if _is_login_limited(username):
+            error = "Too many failed attempts — try again later"
+            return render_template("login.html", error=error, username=username), 429
+        if _verify_dashboard_credentials(username, password):
+            _clear_failed_logins(username)
+            session.permanent = True
             session["authenticated"] = True
             session["username"] = username
+            _ensure_csrf_token()
             return redirect(url_for("index"))
-        else:
-            error = "Invalid credentials — access denied"
+        _record_failed_login(username)
+        error = "Invalid credentials — access denied"
     return render_template("login.html", error=error, username=username)
 
 
@@ -4566,7 +4708,7 @@ def login3_page():
 @app.route("/")
 @_login_required
 def index():
-    return render_template("index.html")
+    return render_template("index.html", csrf_token=_ensure_csrf_token())
 
 
 @app.route("/api/scan/profiles")

@@ -21,6 +21,16 @@ def mock_session():
     return MagicMock(spec=requests.Session)
 
 
+@pytest.fixture(autouse=True)
+def dashboard_csrf_test_default():
+    """Keep legacy dashboard tests focused unless they explicitly enable CSRF."""
+    module = sys.modules.get("app")
+    if module is not None and hasattr(module, "app"):
+        module.app.config["DAST_CSRF_PROTECT"] = False
+        module.app.config["DAST_TEST_CSRF_ENABLED"] = False
+    yield
+
+
 @pytest.fixture
 def sample_finding():
     """Standard ScanFinding-compatible dict."""

@@ -1,8 +1,9 @@
 # ============================================================================
-# DAST Standalone — Docker Compose for Local Usage
+# DAST Standalone — Docker Compose for private EC2/internal usage
 # ============================================================================
 #
 # Quick start:
+#   copy .env.example .env and replace all secrets first
 #   docker compose up                          # UI mode at http://localhost:5000
 #   docker compose up test-target              # Start vulnerable test app
 #   docker compose run scanner-headless        # Scan the test target
@@ -25,7 +26,7 @@ services:
     environment:
       POSTGRES_DB:       ${POSTGRES_DB:-dast}
       POSTGRES_USER:     ${POSTGRES_USER:-dast}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dast_secret}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks:
@@ -50,7 +51,17 @@ services:
       - ./reports:/reports
     environment:
       - PORT=5000
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-dast}:${POSTGRES_PASSWORD:-dast_secret}@postgres:5432/${POSTGRES_DB:-dast}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-dast}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-dast}
+      - REVELIO_SECRET=${REVELIO_SECRET:?Set REVELIO_SECRET in .env}
+      - DAST_ADMIN_USER=${DAST_ADMIN_USER:?Set DAST_ADMIN_USER in .env}
+      - DAST_ADMIN_PASSWORD_HASH=${DAST_ADMIN_PASSWORD_HASH:?Set DAST_ADMIN_PASSWORD_HASH in .env}
+      - DAST_ALLOW_DEFAULT_LOGIN=0
+      - DAST_CSRF_PROTECT=${DAST_CSRF_PROTECT:-1}
+      - DAST_COOKIE_SAMESITE=${DAST_COOKIE_SAMESITE:-Strict}
+      - DAST_COOKIE_SECURE=${DAST_COOKIE_SECURE:-0}
+      - DAST_SESSION_HOURS=${DAST_SESSION_HOURS:-8}
+      - DAST_LOGIN_MAX_ATTEMPTS=${DAST_LOGIN_MAX_ATTEMPTS:-5}
+      - DAST_LOGIN_WINDOW_SECONDS=${DAST_LOGIN_WINDOW_SECONDS:-900}
     restart: unless-stopped
     networks:
       - dast-net
@@ -80,7 +91,7 @@ services:
     volumes:
       - ./reports:/reports
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-dast}:${POSTGRES_PASSWORD:-dast_secret}@postgres:5432/${POSTGRES_DB:-dast}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-dast}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-dast}
     networks:
       - dast-net
     depends_on:

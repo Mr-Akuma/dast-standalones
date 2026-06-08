@@ -1,6 +1,12 @@
 .git
+.env
+.env.*
+!.env.example
 __pycache__
 *.pyc
+*.db
+*.db-wal
+*.db-shm
 *.tmp
 *.log
 examples/
@@ -14,3 +20,6 @@ Dockerfile.test-target
 cookies.txt
 reports/
 dast-results/
+MEMORY/
+SESSION_STATE.md
+BurpBountyData/
